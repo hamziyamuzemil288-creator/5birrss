@@ -4,6 +4,7 @@ import 'routing/app_router.dart';
 import 'core/theme/app_theme.dart';
 import 'core/widgets/app_update_gate.dart';
 import 'core/widgets/connectivity_banner.dart';
+import 'core/widgets/system_banner.dart';
 import 'features/help_chat/floating_chat_button.dart';
 
 class Birr5App extends ConsumerWidget {
@@ -28,6 +29,13 @@ class Birr5App extends ConsumerWidget {
       builder: (context, child) => Column(
         children: [
           const ConnectivityBanner(),
+          // Part 8: the system banner — welcome-after-signup today, any
+          // system-critical alert tomorrow. In the same Column as the
+          // connectivity strip for the same reason that strip is here: it
+          // cannot be popped, cannot stack on a route, and shows on every
+          // screen. It expands from zero height and hides itself, so it never
+          // permanently takes space from the app below.
+          const SystemBanner(),
           // Expanded, not Expanded-less: without it the Column would size
           // itself to the banner and the app would collapse to a sliver.
           Expanded(

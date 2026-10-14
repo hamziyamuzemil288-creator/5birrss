@@ -4,6 +4,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/friendly_error.dart';
 import '../../core/widgets/load_error_view.dart';
+import '../../core/widgets/product_card.dart' show listingCoverUrl;
 
 /// The availability queue, as an administrator sees it.
 ///
@@ -13,10 +14,15 @@ import '../../core/widgets/load_error_view.dart';
 /// provider, what answer, the reason they gave, and how long the answer
 /// took — the number that shows a provider who lets requests time out.
 ///
-/// Read-only by design: providers answer from their dashboard and buyers
-/// stand requests down from the waiting screen. An administrator here is
-/// watching, not participating; the RPCs would refuse them anyway
-/// (respond_availability_request checks the provider ownership itself).
+/// Part 5 of the rework: the administrator ANSWERS too. A provider who goes
+/// quiet used to cost the buyer their 15-minute window and the platform the
+/// sale, even though the platform knew the answer — so PENDING rows carry
+/// Approve/Decline here, next to the same read the queue always had. Which
+/// privileged human answered first decides (respond_availability_request
+/// re-checks PENDING after a row lock, migration 20261014000004), so the
+/// provider's own dashboard buttons and these race safely to one answer.
+/// Each request also shows the listing's cover photo, so a row is
+/// recognisable at a glance rather than by product name alone.
 class AdminAvailabilityScreen extends StatefulWidget {
   const AdminAvailabilityScreen({super.key});
 
@@ -51,7 +57,9 @@ class _AdminAvailabilityScreenState extends State<AdminAvailabilityScreen> {
     try {
       final data = await Supabase.instance.client
           .from('availability_requests')
-          .select('*, products(name), provider_profiles(business_name)')
+          .select(
+              '*, products(name, product_images(storage_path, sort_order)), '
+              'provider_profiles(business_name)')
           .order('created_at', ascending: false)
           .limit(300);
       final rows = List<Map<String, dynamic>>.from(data as List);
@@ -211,6 +219,13 @@ class _AdminAvailabilityScreenState extends State<AdminAvailabilityScreen> {
     final qtyText =
         qty == qty.roundToDouble() ? qty.toInt().toString() : qty.toString();
     final reason = (r['reason'] as String?)?.trim();
+    // Part 5: the listing's own cover photo, same lowest-sort_order rule as
+    // every shared card (listingCoverUrl in core/widgets/product_card.dart).
+    final coverUrl =
+        listingCoverUrl((product?['product_images'] as List?) ?? const []);
+    final cover = coverUrl == null
+        ? null
+        : ResizeImage(NetworkImage(coverUrl), width: 46, height: 46);
 
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
@@ -225,6 +240,23 @@ class _AdminAvailabilityScreenState extends State<AdminAvailabilityScreen> {
         children: [
           Row(
             children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: cover == null
+                    ? Container(
+                        width: 46,
+                        height: 46,
+                        color: AppTheme.creamDark,
+                        child: const Icon(Icons.image_outlined,
+                            size: 20, color: AppTheme.textMuted),
+                      )
+                    : Image(
+                        image: cover,
+                        fit: BoxFit.cover,
+                        width: 46,
+                        height: 46),
+              ),
+              const SizedBox(width: 10),
               Expanded(
                 child: Text(
                   (product?['name'] as String?) ?? 'An item',
@@ -273,8 +305,110 @@ class _AdminAvailabilityScreenState extends State<AdminAvailabilityScreen> {
                   color: AppTheme.textPrimary),
             ),
           ],
+          // Part 5: only PENDING rows can be answered, and only here does
+          // the admin get the buttons — an answered row shows the answer.
+          if (status == 'PENDING') ...[
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => _respond(r, true),
+                    icon: const Icon(Icons.check_circle_outline, size: 16),
+                    label: const Text('APPROVE'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: AppTheme.primaryGreen,
+                      side: const BorderSide(color: AppTheme.primaryGreen),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => _decline(r),
+                    icon: const Icon(Icons.cancel_outlined, size: 16),
+                    label: const Text('DECLINE'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: AppTheme.error,
+                      side: const BorderSide(color: AppTheme.error),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
         ],
       ),
     );
+  }
+
+  /// Part 5: the administrator's own answer, through the same RPC the
+  /// provider's dashboard buttons use — so both paths land in one row, one
+  /// notification, one outcome.
+  Future<void> _respond(Map<String, dynamic> r, bool accept,
+      {String? reason}) async {
+    try {
+      await Supabase.instance.client.rpc('respond_availability_request',
+          params: {
+            'p_request_id': r['id'],
+            'p_accept': accept,
+            if (reason != null && reason.isNotEmpty) 'p_reason': reason,
+          });
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(accept
+              ? 'Approved — the buyer can continue to checkout.'
+              : 'Declined — the buyer has been told.'),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      // The usual loser's error is REQUEST_ALREADY_ANSWERED (the provider
+      // beat the admin to the row) or REQUEST_EXPIRED — both mean "the
+      // database has moved on", so the reload below matters as much as the
+      // sentence.
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+            content: Text(
+                friendlyError(e, context: 'Could not save your answer'))),
+      );
+    } finally {
+      if (mounted) await _load();
+    }
+  }
+
+  /// Decline asks for the same optional reason the provider is asked for,
+  /// because the buyer reads one sentence either way.
+  Future<void> _decline(Map<String, dynamic> r) async {
+    final ctrl = TextEditingController();
+    final reason = await showDialog<String>(
+      context: context,
+      builder: (dialogCtx) => AlertDialog(
+        title: const Text('Decline this request?'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          maxLength: 120,
+          decoration: const InputDecoration(
+            labelText: 'Reason (optional)',
+            hintText: 'e.g. Sold out until Friday',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogCtx),
+            child: const Text('CANCEL'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogCtx, ctrl.text.trim()),
+            child: const Text('SEND'),
+          ),
+        ],
+      ),
+    );
+    ctrl.dispose();
+    if (reason == null || !mounted) return; // dismissed: nothing is sent
+    await _respond(r, false, reason: reason);
   }
 }

@@ -8,15 +8,24 @@ BEGIN;
 ALTER TABLE IF EXISTS public.providers
   ADD COLUMN IF NOT EXISTS registered_by_staff_id uuid;
 
--- 2) Ensure profiles table reference is maintained by a FK if possible
--- Add FK only if profiles table exists and FK not present
+-- 2) Ensure the profiles reference is a FK that never refuses an account
+-- deletion (the staff member's row goes, the link is nulled with it).
+-- Guarded on BOTH tables existing — `public.providers` is not created by any
+-- migration in this repo, so a stock replay must skip instead of raising
+-- 42P01 — and without `ADD CONSTRAINT IF NOT EXISTS`, which PostgreSQL has
+-- no clause for: the parse error escaped the duplicate_object handler and
+-- aborted this whole BEGIN...COMMIT file, which is why the seed in step 4
+-- never applied on a fresh push. (20261014 harness: ON DELETE SET NULL is
+-- also what the account-deletion check demands of every key onto profiles.)
 DO $$
 BEGIN
-  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='profiles') THEN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='providers')
+     AND EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='profiles') THEN
     BEGIN
       ALTER TABLE public.providers
-        ADD CONSTRAINT IF NOT EXISTS fk_providers_registered_by_staff_profiles
-        FOREIGN KEY (registered_by_staff_id) REFERENCES public.profiles(id);
+        ADD CONSTRAINT fk_providers_registered_by_staff_profiles
+        FOREIGN KEY (registered_by_staff_id) REFERENCES public.profiles(id)
+        ON DELETE SET NULL;
     EXCEPTION WHEN duplicate_object THEN
       -- constraint already exists; ignore
     END;
@@ -29,7 +38,14 @@ CREATE TABLE IF NOT EXISTS public.system_settings (
   value text
 );
 
--- 4) Seed admin settings used by the app (idempotent)
+-- 4) Seed admin settings used by the app (idempotent).
+--    This seed runs at migration time, where auth.uid() is NULL, so the
+--    blanket guard trigger trg_system_settings_security would raise
+--    SETTINGS_ARE_ADMIN_ONLY regardless of how privileged this connection
+--    is — lift it for the seed and put it straight back, the same pattern
+--    0028/0038/0062 use and the reason 0113's seed died on push.
+ALTER TABLE public.system_settings DISABLE TRIGGER trg_system_settings_security;
+
 INSERT INTO public.system_settings(key, value) VALUES
   ('admin_contact_phone', '')
 ON CONFLICT (key) DO NOTHING;
@@ -37,6 +53,8 @@ ON CONFLICT (key) DO NOTHING;
 INSERT INTO public.system_settings(key, value) VALUES
   ('admin_payment_details', '')
 ON CONFLICT (key) DO NOTHING;
+
+ALTER TABLE public.system_settings ENABLE TRIGGER trg_system_settings_security;
 
 -- 5) Create trigger function to auto-approve self-service provider inserts
 CREATE OR REPLACE FUNCTION public.set_provider_status_on_insert()

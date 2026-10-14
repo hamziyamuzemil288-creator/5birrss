@@ -254,10 +254,23 @@ def check_signup_otp_contract() -> list[str]:
             "signup_screen.dart: /otp-verify is not gated on _otpRequired, so "
             "a build would demand a code whose email cannot be delivered"
         )
-    if "_captchaRequired = results[0] && otpRequired" not in screen:
+    # Part 1 of the rework: the CAPTCHA is ALWAYS on at signup, no longer
+    # tied to the OTP toggle. The old coupling meant that switching the mail
+    # gate off — the normal state, since send-otp returns `skipped` when no
+    # mail provider is configured — also silently switched off the only
+    # bot-throttle registration has. The screen loads it as true unconditionally
+    # and the submit refuses without a completed challenge.
+    if not re.search(r"_captchaRequired\s*=\s*true", screen):
         problems.append(
-            "signup_screen.dart: the captcha is no longer tied to the OTP "
-            "requirement, so users are challenged for a code that is skipped"
+            "signup_screen.dart: the signup CAPTCHA is no longer always-on "
+            "(Part 1) — `_captchaRequired = true` must be set while the "
+            "screen loads its gates, independent of the OTP toggle"
+        )
+    if "_captchaRequired && _captchaId == null" not in screen:
+        problems.append(
+            "signup_screen.dart: _handleSubmit no longer refuses to submit "
+            "without a completed security check, so the always-on challenge "
+            "is cosmetic"
         )
 
     return problems
@@ -8742,11 +8755,22 @@ def check_no_contact_before_payment() -> list[str]:
 
     checkout = _dart_without_comments(
         _read(LIB / "features" / "user" / "user_checkout_screen.dart"))
-    if "PaymentAccountsCard(" not in checkout or \
-            "onFindAnother:" not in checkout:
+    # Part 4 of the rework: the buyer pays the PLATFORM's account, configured
+    # in Admin → Payment Settings and rendered by AdminPaymentDetailsCard.
+    # The provider-account card is gone from checkout along with its
+    # "Find another provider" escape — that escape existed only because
+    # payment depended on ONE provider having an account, which is the
+    # dependency this rework closes.
+    if "AdminPaymentDetailsCard(" not in checkout:
         problems.append(
-            "user_checkout_screen.dart: the account card is not rendered "
-            "with a Find-another-provider route")
+            "user_checkout_screen.dart: the checkout no longer renders "
+            "AdminPaymentDetailsCard, so the buyer is not pointed at the "
+            "platform's configured account (Part 4)")
+    if "PaymentAccountsCard(" in checkout or \
+            "provider_payment_accounts" in checkout:
+        problems.append(
+            "user_checkout_screen.dart: a provider's payment account is "
+            "back on checkout — buyers pay the platform, never a provider")
 
     detail = _dart_without_comments(
         _read(LIB / "features" / "user" / "user_product_detail_screen.dart"))
@@ -9256,6 +9280,167 @@ def check_like_and_dislike_are_offered_wherever_a_listing_is() -> list[str]:
     return problems
 
 
+# ---------------------------------------------------------------------------
+# the Parts 1-8 registration rework: every promised half is still connected
+# ---------------------------------------------------------------------------
+def check_registration_rework_is_wired() -> list[str]:
+    """Each part is a server half and a client half; either can quietly vanish.
+
+    The 20261014* migrations restate the rules (self-service registration is
+    immediately active, document verification is voluntary, display_price is
+    the one public price, the platform's contact number and payment account
+    are data, admins may answer availability requests, staff registration
+    oversight is counted). None of that REACHES a person if the door in lib/
+    disappears: a route nobody declares, a dashboard card nobody renders, a
+    card a screen stopped embedding, a banner never mounted. Each needle is
+    the smallest string that proves one half of one part is still wired to
+    the other, and each failure names the part it protects.
+    """
+    problems: list[str] = []
+    mig_dir = ROOT / "supabase" / "migrations"
+
+    def mig(name: str) -> str:
+        path = mig_dir / name
+        if not path.is_file():
+            problems.append(
+                "%s is missing — a part of the rework has no server half"
+                % name)
+            return ""
+        return _read(path)
+
+    m0 = mig("20261014000000_self_service_registration_is_immediately_active"
+             ".sql")
+    m1 = mig("20261014000001_document_verification_is_voluntary_for_service_"
+             "providers.sql")
+    m2 = mig("20261014000002_display_price_is_the_public_price.sql")
+    m3 = mig("20261014000003_platform_contact_and_payment_settings.sql")
+    m4 = mig("20261014000004_admin_answers_availability_requests_too.sql")
+    m5 = mig("20261014000005_staff_registration_oversight.sql")
+
+    # ── server halves ──
+    for fname, sql, needle, why in (
+        ("20261014000000_self_service_registration_is_immediately_active.sql",
+         m0, "'APPROVED'::account_status",
+         "Part 1: a self-signed-up profile is no longer born APPROVED"),
+        ("20261014000000_self_service_registration_is_immediately_active.sql",
+         m0, "notify_user_once",
+         "Part 1: the keyed welcome after approval is not sent anymore"),
+        ("20261014000001_document_verification_is_voluntary_for_service_"
+         "providers.sql", m1, "VEHICLE_PROVIDER",
+         "Part 1.3: the DOCUMENTS_UNVERIFIED branch is no longer scoped to "
+         "vehicle providers, so voluntary verification has become "
+         "mandatory again for everyone"),
+        ("20261014000002_display_price_is_the_public_price.sql",
+         m2, "display_price",
+         "Part 2: the generated public price column is gone, so every "
+         "surface computes its own markup again"),
+        ("20261014000002_display_price_is_the_public_price.sql",
+         m2, "search_products",
+         "Part 2: the public discovery read still projects raw price"),
+        ("20261014000003_platform_contact_and_payment_settings.sql",
+         m3, "public_app_settings",
+         "Part 3/4: buyers have no whitelisted way to read the platform's "
+         "contact number and payment account"),
+        ("20261014000003_platform_contact_and_payment_settings.sql",
+         m3, "admin_contact_phone",
+         "Part 3: the platform contact key is not seeded"),
+        ("20261014000003_platform_contact_and_payment_settings.sql",
+         m3, "admin_payment_details",
+         "Part 4: the platform payment key is not seeded"),
+        ("20261014000004_admin_answers_availability_requests_too.sql",
+         m4, "public.is_admin()",
+         "Part 5: respond_availability_request refuses administrators "
+         "again, so the admin queue can show buttons that cannot work"),
+        ("20261014000004_admin_answers_availability_requests_too.sql",
+         m4, "REQUEST_ALREADY_ANSWERED",
+         "Part 5: the either-party-first race guard is gone, so provider "
+         "and admin can double-answer one request"),
+        ("20261014000005_staff_registration_oversight.sql",
+         m5, "staff_registration_stats",
+         "Part 6: the per-staff registration oversight aggregate is gone"),
+        ("20261014000005_staff_registration_oversight.sql",
+         m5, "referred_by_staff_id",
+         "Part 6: oversight no longer keys on the staff referral column"),
+    ):
+        if sql and needle not in sql:
+            problems.append("%s: %s" % (fname, why))
+
+    # ── client halves ──
+    def dart(rel: str, *needles: str, why: str) -> str:
+        text = _read(LIB / rel)
+        if not text:
+            problems.append("lib/%s is missing — %s" % (rel, why))
+            return text
+        for needle in needles:
+            if needle not in text:
+                problems.append("lib/%s: %s (no %r)" % (rel, why, needle))
+        return text
+
+    router = "routing/app_router.dart"
+    dart(router, "/provider/documents",
+         why="Part 1.3/8: the voluntary Verify Documents screen has no route")
+    dart(router, "/admin/platform-settings",
+         why="Part 3/4: the admin contact/payment settings screen has no route")
+    dart(router, "queryParameters['assisted'] == '1'",
+         why="Part 6: the staff-assisted signup flag is never read from the "
+             "URL, so the staff door opens an ordinary self-service signup")
+    dart("features/provider/service_provider_dashboard.dart", "Verify Documents",
+         "'/provider/documents'",
+         why="Part 1.3: providers cannot reach their own document upload "
+             "from Settings")
+    dart("features/admin/admin_dashboard.dart", "Contact Settings", "Payment Settings",
+         "/admin/platform-settings?section=",
+         why="Part 3/4: the admin doors to the platform contact/payment "
+             "settings are gone")
+    dart("features/auth/signup_screen.dart", "_captchaRequired = true", "_agreedToTerms",
+         "SystemBannerController.instance.show", "context.go(switch (widget.role)",
+         "'/provider/documents'",
+         why="Part 1/6/8: signup lost one of always-on CAPTCHA, privacy "
+             "checkbox, welcome banner, direct dashboard navigation or the "
+             "staff-assisted walk into document upload")
+    dart("app.dart", "const SystemBanner()",
+         why="Part 8: the system banner is not mounted above the navigator")
+    dart("features/user/user_order_detail_screen.dart", "AdminPaymentDetailsCard(",
+         "PlatformContactCard()",
+         why="Part 3/4: the order screen no longer shows the platform's "
+             "payment account and platform support contact")
+    dart("features/user/user_checkout_screen.dart", "AdminPaymentDetailsCard(",
+         why="Part 4: checkout no longer renders the platform payment card")
+    dart("features/admin/admin_availability_screen.dart", "respond_availability_request",
+         "listingCoverUrl", "'APPROVE'",
+         why="Part 5: the admin queue lost its answer action or the request "
+             "cover photo")
+    dart("features/provider/service_provider_dashboard.dart",
+         "product_images(storage_path, sort_order)", "listingCoverUrl",
+         why="Part 5: the provider's request card lost the listing cover photo")
+    dart("features/staff/staff_dashboard_screen.dart", "assisted=1",
+         "Register a provider",
+         why="Part 6: the staff workspace has no assisted-registration door")
+    dart("features/admin/admin_staff_screen.dart", "staff_registration_stats",
+         why="Part 6: the performance dialog no longer shows how many "
+             "providers this staff member registered and what they posted")
+    dart("core/models/product.dart", "formattedDisplayPrice", "publicPrice",
+         why="Part 2: the Product model no longer reads the public price")
+    dart("core/services/cart_service.dart", "display_price",
+         why="Part 2: the cart still reads the provider's raw price")
+    dart("core/services/platform_settings_service.dart", "public_app_settings",
+         why="Part 3/4: the buyer-safe settings reader no longer calls the "
+             "whitelisted RPC")
+
+    for rel in (
+        "core/widgets/system_banner.dart",
+        "core/widgets/admin_payment_details_card.dart",
+        "core/widgets/platform_contact_card.dart",
+        "features/provider/provider_documents_screen.dart",
+        "features/admin/admin_platform_settings_screen.dart",
+    ):
+        if not (LIB / rel).is_file():
+            problems.append("lib/%s is missing — a rework surface was deleted"
+                            % rel)
+
+    return problems
+
+
 CHECKS = [
     ("a listing carries its own type from its own category, and a booking "
      "behaves like a booking end to end",
@@ -9403,6 +9588,8 @@ CHECKS = [
      "buyers browse, photo-less listings private, and trending ranked by the "
      "last 7 days",
      check_one_action_per_listing_and_no_provider_control_where_buyers_browse),
+    ("the Parts 1-8 registration rework is wired: server halves, client doors",
+     check_registration_rework_is_wired),
 ]
 
 

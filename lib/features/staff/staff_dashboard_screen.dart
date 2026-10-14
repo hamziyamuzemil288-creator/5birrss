@@ -186,6 +186,42 @@ class _StaffDashboardScreenState extends ConsumerState<StaffDashboardScreen> {
     context.push(route);
   }
 
+  /// Part 6: staff-assisted registration, with its trade-off stated before
+  /// the form opens. The dialog says what the mode IS — the pair fills the
+  /// signup together, the staff member's own referral code marks the account,
+  /// and the provider stays inactive for trading until an administrator
+  /// reviews their documents — because a staff member who does not know that
+  /// would register the provider expecting them to sell immediately.
+  Future<void> _registerProviderOnBehalf() async {
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (dialogCtx) => AlertDialog(
+        title: const Text('Register a provider?'),
+        content: const Text(
+          'You will fill the signup form together with the provider. Enter '
+          'YOUR staff referral code when asked — it marks the account as '
+          'staff-assisted, so the provider stays inactive for trading until '
+          'an administrator reviews their documents.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogCtx, false),
+            child: const Text('CANCEL'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogCtx, true),
+            child: const Text('CONTINUE'),
+          ),
+        ],
+      ),
+    );
+    if (go != true || !mounted) return;
+    // The signup replaces this session with the new provider's — the same
+    // handover the signup screen itself documents (the staff member signs
+    // back in from Profile → Sign out afterwards).
+    context.push('/signup/service?assisted=1');
+  }
+
   Future<void> _changePassword() async {
     final current = TextEditingController();
     final next = TextEditingController();
@@ -310,12 +346,18 @@ class _StaffDashboardScreenState extends ConsumerState<StaffDashboardScreen> {
           PopupMenuButton<String>(
             onSelected: (value) {
               if (value == 'password') _changePassword();
+              if (value == 'signup') _registerProviderOnBehalf();
               if (value == 'logout') {
                 ref.read(auth_state.authProvider.notifier).signOut();
                 context.go('/staff/login');
               }
             },
             itemBuilder: (_) => const [
+              // Part 6: the staff-assisted registration door. The signup it
+              // opens carries `?assisted=1`, which the router turns into
+              // SignupScreen.assistedByStaff.
+              PopupMenuItem(
+                  value: 'signup', child: Text('Register a provider')),
               PopupMenuItem(value: 'password', child: Text('Change password')),
               PopupMenuItem(value: 'logout', child: Text('Sign out')),
             ],

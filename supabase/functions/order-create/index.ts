@@ -154,7 +154,11 @@ Deno.serve(async (req: Request) => {
     const { data: products, error: productsError } = await admin
       .from("products")
       .select(
-        "id, provider_id, price, currency, is_active, is_available, stock_quantity, listing_status"
+        // 20261014000002: display_price is the PUBLIC price every screen shows
+        // (generated column: provider price + 5 + 1.9%). The raw `price` is
+        // kept only as a fallback for the window before that migration is
+        // applied — the buyer must never be charged a number no screen showed.
+        "id, provider_id, price, display_price, currency, is_active, is_available, stock_quantity, listing_status"
       )
       .in("id", productIds);
 
@@ -168,6 +172,18 @@ Deno.serve(async (req: Request) => {
     }
 
     const productById = new Map(products.map((p) => [p.id, p]));
+
+    // The authoritative unit price of one listing: the generated public
+    // price, falling back to the raw price only while the column is absent.
+    const unitPriceOf = (product: {
+      price?: unknown;
+      display_price?: unknown;
+    }): number => {
+      const display = Number(product.display_price);
+      return Number.isFinite(display) && product.display_price !== null
+        ? display
+        : Number(product.price);
+    };
 
     let subtotal = 0;
     let currency: string | null = null;
@@ -221,8 +237,10 @@ Deno.serve(async (req: Request) => {
         );
       }
 
-      // Server-authoritative price — client-supplied prices are never read.
-      subtotal += Number(product.price) * item.quantity;
+      // Server-authoritative price — client-supplied prices are never read,
+      // and the number charged is the same display price every public card,
+      // cart line and checkout total shows (20261014000002).
+      subtotal += unitPriceOf(product) * item.quantity;
     }
 
     const total = Math.round(subtotal * 100) / 100; // round to cents/kobo-equivalent
@@ -231,7 +249,7 @@ Deno.serve(async (req: Request) => {
     const itemsPayload = cleanedItems.map((item) => ({
       product_id: item.product_id,
       quantity: item.quantity,
-      unit_price: productById.get(item.product_id)!.price, // server value
+      unit_price: unitPriceOf(productById.get(item.product_id)!), // server value
     }));
 
     // Phase 4: fulfillment mode (defaults to DELIVERY for old clients).

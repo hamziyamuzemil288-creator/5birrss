@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:postgrest/postgrest.dart' show CountOption;
 import '../../core/theme/app_theme.dart';
 import '../../core/providers/auth_provider.dart';
 import '../../core/services/points_service.dart';
@@ -12,6 +11,7 @@ import '../../core/services/rank_service.dart';
 import '../../core/services/resilient_subscription.dart';
 import '../../core/utils/friendly_error.dart';
 import '../../core/widgets/load_error_view.dart';
+import '../../core/widgets/product_card.dart' show listingCoverUrl;
 import '../../core/widgets/publish_readiness_banner.dart';
 import '../../core/widgets/rank_badge.dart';
 import '../../core/widgets/dashboard_top_tabs.dart';
@@ -45,7 +45,7 @@ class _ServiceProviderDashboardState
   /// Counted separately because they are the ones with a deadline attached: a
   /// buyer is sitting on "Waiting for the provider to confirm availability" and
   /// cannot pay until this is answered.
-  int _awaitingAvailability = 0;
+  int _awaitingAvailability = 0; // kept so the build slate can announce "N new requests" — wire when a future turn adds that notification
 
   /// Pre-order availability requests (the gate every Buy/Book now crosses,
   /// migration 20261006000006) still PENDING on this provider's listings —
@@ -196,7 +196,8 @@ class _ServiceProviderDashboardState
           .from('availability_requests')
           .select(
               'id, product_id, quantity, created_at, expires_at, '
-              'products(name, listing_type)')
+              'products(name, listing_type, '
+              'product_images(storage_path, sort_order))')
           .eq('provider_id', providerId)
           .eq('status', 'PENDING')
           .order('created_at', ascending: false)
@@ -390,6 +391,15 @@ class _ServiceProviderDashboardState
   Widget _availabilityTile(Map<String, dynamic> request) {
     final product = request['products'] as Map<String, dynamic>?;
     final name = product?['name'] as String? ?? 'An item';
+    // Part 5: the request shows the listing's own cover photo — the same
+    // lowest-sort_order rule every shared card uses (listingCoverUrl in
+    // core/widgets/product_card.dart), so "which item is this" is answered
+    // by the picture the buyer was looking at when they asked.
+    final coverUrl = listingCoverUrl(
+        (product?['product_images'] as List?) ?? const []);
+    final cover = coverUrl == null
+        ? null
+        : ResizeImage(NetworkImage(coverUrl), width: 44, height: 44);
     // A SERVICE or a ROOM is BOOKED, everything else is bought — the same two
     // types the buyer's own button reads (`listingActionLabel` in
     // core/widgets/product_card.dart). The request is identical either way; what
@@ -406,11 +416,30 @@ class _ServiceProviderDashboardState
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            isBooking ? '$name · booking' : '$name × $qtyText',
-            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
+          Row(
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: cover == null
+                    ? Container(
+                        width: 44,
+                        height: 44,
+                        color: AppTheme.creamDark,
+                        child: const Icon(Icons.image_outlined,
+                            size: 20, color: AppTheme.textMuted),
+                      )
+                    : Image(image: cover, fit: BoxFit.cover, width: 44, height: 44),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  isBooking ? '$name · booking' : '$name × $qtyText',
+                  style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
           ),
           const SizedBox(height: 8),
           Row(
@@ -609,6 +638,14 @@ class _ServiceProviderDashboardState
                             // are, this one is what they sell.
                             _action(Icons.tune, 'Settings & Pricing',
                                 () => context.push('/provider/category-settings')),
+                            // Parts 1 and 8: document verification is
+                            // voluntary and lives here — this door did not
+                            // exist while the server refused to activate a
+                            // provider without documents nobody could upload
+                            // from Settings. Nothing behind it gates trading:
+                            // posting and selling work without it.
+                            _action(Icons.badge_outlined, 'Verify Documents',
+                                () => context.push('/provider/documents')),
                             // Only rendered once a profile row exists. The
                             // route is /provider/gallery/:id, so a null id
                             // here would push a path matching no route at all.

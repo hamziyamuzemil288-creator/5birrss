@@ -15,6 +15,8 @@ import '../../core/services/location_service.dart';
 import '../../core/services/order_chat_service.dart';
 import '../../core/utils/order_number_format.dart';
 import '../../core/utils/friendly_error.dart';
+import '../../core/widgets/admin_payment_details_card.dart';
+import '../../core/widgets/platform_contact_card.dart';
 import '../../core/widgets/rank_badge.dart';
 
 /// Statuses from which CANCELLED is a legal transition for the BUYER
@@ -1040,6 +1042,14 @@ class _UserOrderDetailScreenState
                           _locationCard(),
                           const SizedBox(height: 16),
                         ],
+                        // Part 3: the buyer's only "call a human" door
+                        // points at the PLATFORM (Admin → Contact Settings),
+                        // never at the provider — and never at a number
+                        // hard-coded into this screen.
+                        if (!_isProvider) ...[
+                          const PlatformContactCard(),
+                          const SizedBox(height: 16),
+                        ],
                         _itemsCard(),
                         const SizedBox(height: 16),
                         if (_proofUrl != null) _proofCard(),
@@ -1182,20 +1192,21 @@ class _UserOrderDetailScreenState
 
   /// The payment step: where to pay, and the button that attaches the receipt.
   ///
-  /// Reads the same `payment_methods` rows the admin screen edits, through
-  /// the same RLS (`is_active = true OR is_admin()`), so there is no second
-  /// list to keep in sync. Rendered only once the provider has confirmed
-  /// availability — on a gated order that is exactly the moment
-  /// [ _awaitingMyPayment] becomes true, so "confirmation happened" and
-  /// "this card appeared" cannot drift apart.
+  /// Part 4 of the rework: the details are [AdminPaymentDetailsCard] — the
+  /// PLATFORM's account, read from the administrator's configuration
+  /// (`admin_payment_details`, with the admin-managed Payment Methods rows
+  /// as the fallback), never a provider's saved account. The provider's own
+  /// money channel for receiving earnings (their wallet) is untouched; what
+  /// changed is whose account the BUYER sends money to.
   ///
-  /// The provider's business name is on the card. The accounts are the
-  /// platform's, not the provider's own, and the buyer is being asked to
-  /// send real money to a number they cannot otherwise attribute to the
-  /// person who just confirmed their booking — naming the business is the
-  /// difference between "pay this account" and "pay this person".
+  /// Rendered only once the provider has confirmed availability — on a gated
+  /// order that is exactly the moment [ _awaitingMyPayment] becomes true, so
+  /// "confirmation happened" and "this card appeared" cannot drift apart.
+  ///
+  /// The provider's business name stays on the card: the buyer is still
+  /// paying for THAT business's service, and naming it is the difference
+  /// between "pay this order" and "pay some unnamed account".
   Widget _paymentStepCard() {
-    final methods = _paymentMethods ?? const <Map<String, dynamic>>[];
     final providerName = ((_order?['provider_profiles']
         as Map<String, dynamic>?)?['business_name'] as String?)?.trim();
     return Container(
@@ -1233,59 +1244,11 @@ class _UserOrderDetailScreenState
                 style: const TextStyle(
                     fontSize: 12, color: AppTheme.textSecondary)),
           ],
-          const SizedBox(height: 4),
-          const Text(
-            'Pay into any of these accounts, then attach the transfer receipt '
-            'below. An admin verifies it before the order starts.',
-            style: TextStyle(fontSize: 12, height: 1.4, color: AppTheme.textMuted),
-          ),
-          const SizedBox(height: 12),
-          if (methods.isEmpty)
-            // Reached when the payment_methods read came back empty, or when
-            // it failed outright — `_loadPaymentMethods` returns null on a
-            // failure and the caller still shows this card so the buyer is
-            // not left with no way to pay. Saying which of the two it is would
-            // be a guess, so it says what is true either way.
-            const Text(
-              'No payment account is available right now. Our team will '
-              'contact you with the details.',
-              style: TextStyle(fontSize: 12.5, color: AppTheme.textSecondary),
-            )
-          else
-            for (final m in methods)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      '${m['name'] ?? 'Payment'}'
-                      '${(m['account_name'] as String?)?.isNotEmpty == true ? ' — ${m['account_name']}' : ''}',
-                      style: const TextStyle(
-                          fontSize: 13, fontWeight: FontWeight.w700),
-                    ),
-                    if ((m['account_number'] as String?)?.isNotEmpty == true)
-                      Text(
-                        m['account_number'] as String,
-                        style: const TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w700,
-                          color: AppTheme.primaryGreen,
-                          letterSpacing: 0.4,
-                        ),
-                      ),
-                    if ((m['instructions'] as String?)?.isNotEmpty == true)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 2),
-                        child: Text(
-                          m['instructions'] as String,
-                          style: const TextStyle(
-                              fontSize: 11.5, color: AppTheme.textMuted),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
+          const SizedBox(height: 8),
+          // Part 4: whose account receives the money — the platform's,
+          // configured in Admin → Payment Settings. One card, one source,
+          // identical to what checkout shows.
+          const AdminPaymentDetailsCard(),
           if (_awaitingMyPayment) ...[
             const SizedBox(height: 6),
             SizedBox(

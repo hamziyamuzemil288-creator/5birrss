@@ -1175,6 +1175,25 @@ class _AdminStaffScreenState extends ConsumerState<AdminStaffScreen> {
         // The performance numbers still stand on their own; a missing warning
         // count must not blank the dialog.
       }
+      // Part 6 (migration 20261014000005): what this staff member actually
+      // brought in — the providers they registered and the listings those
+      // providers went on to post. Best-effort like the warning count above:
+      // a database that has not run the migration still shows the rest of
+      // the dialog.
+      var providersRegistered = 0;
+      var productsPosted = 0;
+      try {
+        final reg = await client.rpc('staff_registration_stats',
+            params: {'p_staff_id': staff['id']});
+        final regRow = (reg as List).isNotEmpty
+            ? Map<String, dynamic>.from(reg.first as Map)
+            : <String, dynamic>{};
+        providersRegistered =
+            (regRow['providers_registered'] as num?)?.toInt() ?? 0;
+        productsPosted = (regRow['products_posted'] as num?)?.toInt() ?? 0;
+      } catch (_) {
+        // Migration pending — the other numbers still stand.
+      }
       if (!mounted) return;
       showDialog<void>(
         context: context,
@@ -1185,6 +1204,11 @@ class _AdminStaffScreenState extends ConsumerState<AdminStaffScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text('Registrations approved: ${r['registrations'] ?? 0}'),
+              // The registration oversight rows — same dialog, because "how
+              // many providers did they bring in" is a performance question
+              // and belongs beside the approvals count, not on another screen.
+              Text('Providers registered: $providersRegistered'),
+              Text('Listings those providers posted: $productsPosted'),
               Text('Sales total: ETB ${r['sales_total'] ?? 0}'),
               Text('Orders: ${r['orders_count'] ?? 0}'),
               Text('Rides: ${r['rides_count'] ?? 0}'),
@@ -1398,6 +1422,7 @@ class _AdminStaffScreenState extends ConsumerState<AdminStaffScreen> {
   /// missing-glyph box, because the log table is written by many code paths
   /// and a new kind must not render as a tofu character.
   IconData _movementIcon(String kind, {Color? color, double size = 24}) {
+    assert(size > 0);
     final k = kind.toLowerCase();
     if (k.contains('login') || k.contains('signin') || k.contains('sign_in')) {
       return Icons.login_outlined;

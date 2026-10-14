@@ -102,7 +102,7 @@ class CartService {
     final data = await _client
         .from('cart_items')
         .select(
-            'id, quantity, added_at, products(id, provider_id, name, price, currency, unit, listing_type, product_images(*), provider_profiles(business_name))')
+            'id, quantity, added_at, products(id, provider_id, name, price, display_price, currency, unit, listing_type, product_images(*), provider_profiles(business_name))')
         .eq('user_id', userId)
         .order('added_at');
 
@@ -168,7 +168,11 @@ class CartService {
         providerName:
             provider is Map ? provider['business_name'] as String? : null,
         name: (product['name'] as String?) ?? '',
-        price: (product['price'] as num?)?.toDouble() ?? 0,
+        // The cart is a BUYER surface: the line price is the public
+        // display_price (20261014000002). `price` is only the fallback for a
+        // database that has not run that migration yet — the same number the
+        // server will charge (order-create reads the same column).
+        price: ((product['display_price'] ?? product['price']) as num?)?.toDouble() ?? 0,
         currency: (product['currency'] as String?) ?? 'ETB',
         quantity: (row['quantity'] as num?)?.toDouble() ?? 1,
         unit: product['unit'] as String?,

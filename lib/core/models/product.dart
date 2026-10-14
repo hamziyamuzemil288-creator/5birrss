@@ -6,7 +6,20 @@ class Product {
   final String? categoryId;
   final String name;
   final String? description;
+
+  /// The provider's own raw price (`products.price`) — what the product form
+  /// writes and what the PROVIDER's own screens show. Never shown publicly:
+  /// since migration 20261014000002 every buyer-facing surface reads
+  /// [publicPrice] instead.
   final double price;
+
+  /// The PUBLIC price — the generated `products.display_price` column
+  /// (provider price + 5 + 1.9%, computed once in the database). Null only
+  /// when the row predates migration 20261014000002; callers fall back to
+  /// [price] so a database that has not run the migration yet behaves as it
+  /// did before. This is a READ, never a Dart computation: the arithmetic
+  /// exists exactly once, in the table.
+  final double? publicPrice;
   final String currency;
   final String listingType; // PRODUCT, FOOD, SERVICE, ROOM, OTHER
   final int? quantity;
@@ -44,6 +57,7 @@ class Product {
     required this.name,
     this.description,
     required this.price,
+    this.publicPrice,
     this.currency = 'ETB',
     this.listingType = 'PRODUCT',
     this.quantity,
@@ -73,6 +87,9 @@ class Product {
       name: json['name'] as String,
       description: json['description'] as String?,
       price: (json['price'] as num).toDouble(),
+      // Absent means the database has not run 20261014000002 yet; the
+      // getters below then fall back to `price` rather than showing nothing.
+      publicPrice: (json['display_price'] as num?)?.toDouble(),
       currency: json['currency'] as String? ?? 'ETB',
       listingType: json['listing_type'] as String? ?? 'PRODUCT',
       quantity: json['quantity'] as int?,
@@ -139,10 +156,15 @@ class Product {
   bool get isUnitPriced => unit == 'KG' || unit == 'LTR';
 
   /// Display price: "50 ETB/kg" for unit-priced items, "50 ETB" otherwise.
+  ///
+  /// The number shown is ALWAYS the public price (the generated
+  /// `display_price` — provider price + 5 + 1.9%), never the provider's raw
+  /// [price]. One column, read here; no screen recomputes the markup.
   String get formattedDisplayPrice {
-    if (!isUnitPriced) return formattedPrice;
+    final shown = publicPrice ?? price;
+    if (!isUnitPriced) return '${_fmt(shown)} $currency';
     final unitWord = unit == 'KG' ? 'kg' : 'liter';
-    return '${_fmt(price)} $currency/$unitWord';
+    return '${_fmt(shown)} $currency/$unitWord';
   }
 
   static String _fmt(double v) =>

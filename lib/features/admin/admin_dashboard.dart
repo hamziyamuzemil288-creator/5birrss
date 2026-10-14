@@ -748,6 +748,23 @@ class _AdminDashboardState extends ConsumerState<AdminDashboard> {
                           if (ref.read(authProvider).isAdmin)
                             _menuCard(Icons.settings_outlined, 'System Settings',
                                 'Fees, points & rank rules', () => context.push('/admin/settings')),
+                          // Parts 3 and 4: the number a buyer calls and the
+                          // account a buyer pays into are DATA, edited here
+                          // and read by every buyer-facing card through
+                          // public_app_settings(). Two doors into one screen
+                          // (initialSection focuses the right half) because
+                          // "who do we call" and "where does the money land"
+                          // are different decisions. Each card carries its
+                          // OWN `if` — the list-literal trap the Fees card
+                          // below documents applies to these too.
+                          if (ref.read(authProvider).isAdmin)
+                            _menuCard(Icons.contact_phone_outlined, 'Contact Settings',
+                                'The number buyers call',
+                                () => context.push('/admin/platform-settings?section=contact')),
+                          if (ref.read(authProvider).isAdmin)
+                            _menuCard(Icons.account_balance_outlined, 'Payment Settings',
+                                'The account buyers pay into',
+                                () => context.push('/admin/platform-settings?section=payment')),
                           // Every money value the platform charges, editable
                           // live. Separate from System Settings because a fee
                           // change is a money decision with its own history,

@@ -7,7 +7,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:storage_client/storage_client.dart' show FileOptions;
 import '../../core/theme/app_theme.dart';
 import '../../core/widgets/birr_text_field.dart';
-import '../../core/widgets/payment_accounts_card.dart';
+import '../../core/widgets/admin_payment_details_card.dart';
 import '../../core/widgets/primary_button.dart';
 import '../../core/services/cart_service.dart';
 import '../../core/services/fee_resolver.dart';
@@ -91,14 +91,12 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
   // the commission arithmetic.
   FeeQuote? _commissionPreview;
 
-  /// The provider's saved payment accounts (bank / Telebirr / CBE Birr),
-  /// shown on the card above the payment reference. Null until the first
-  /// read finishes. An unreadable read is `PaymentAccounts.unreadable` —
-  /// the card shows its loading state and the order is NOT blocked, because
-  /// only a KNOWN-empty list means "nowhere to send money"; a failed query
-  /// is not evidence of that.
-  PaymentAccounts? _accounts;
-  bool _accountsLoading = true;
+  // Part 4: whose account the buyer pays. The provider's saved accounts are
+  // no longer read here AT ALL — the card below is AdminPaymentDetailsCard,
+  // which shows the PLATFORM's configured account (Admin → Payment Settings)
+  // with the platform's Payment Methods rows as fallback. Nothing about the
+  // provider's payout side changes: providers still receive their earnings
+  // through their own wallet, untouched by this rework.
 
   // The provider's category and city used to be read here as well, for a
   // buyer-visible platform-fee quote. That row is gone (the fee is charged
@@ -188,10 +186,6 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
       // and city), never to the buyer, so showing it on the buyer's checkout
       // was a number the buyer never pays — the fee still lives in the
       // provider wallet screen and the admin income views, where it is real.
-      var accounts = PaymentAccounts.unreadable;
-      try {
-        accounts = await PaymentAccounts.load(widget.providerId);
-      } catch (_) {}
       // Skip the ID upload for buyers who already verified one at signup
       // (older accounts / re-installed app). Best-effort: on failure the
       // checkout keeps asking for the ID, which is always safe.
@@ -275,8 +269,6 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
       if (mounted) {
         setState(() {
           _items = items;
-          _accounts = accounts;
-          _accountsLoading = false;
           _needsAvailabilityConfirmation = needsConfirmation;
           // A basket of bookings does not need a delivery address, and asking
           // for one is where a booking stopped looking like a booking. The
@@ -302,14 +294,6 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
   }
 
   double get _total => _items.fold(0.0, (sum, i) => sum + i.lineTotal);
-
-  /// A seller with no saved account: the card's own action sends the buyer
-  /// back to the marketplace to pick someone else (item 7 — no pre-payment
-  /// contact channel, so there is no "contact seller" to fall back to).
-  void _findAnotherProvider() {
-    if (!mounted) return;
-    context.go('/user');
-  }
 
   Future<void> _pickScreenshot() async {
     // Downscaled like every other bucket upload in the app. payment-proofs
@@ -382,22 +366,11 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
       if (!_providerActivated || !_providerHasBalance) return;
     }
 
-    // No account saved → nowhere to send money, so the order would be paid
-    // into nothing. Re-read at submission (the provider may have just saved
-    // one on another device); only a KNOWN-empty list blocks — an unreadable
-    // read never does, because taking away the buyer's only way to pay on
-    // the strength of an error is the worse mistake. The card above already
-    // says it and offers "Find another provider"; the guard repeats the
-    // sentence for the buyer who scrolled past it (item 7: no pre-payment
-    // contact advice anywhere).
-    final accounts = await PaymentAccounts.load(widget.providerId);
-    if (mounted) setState(() => _accounts = accounts);
-    if (accounts.readable && accounts.isEmpty) {
-      setState(() => _error =
-          'This seller can\'t accept orders yet — no payment account on '
-          'file. Find another provider.');
-      return;
-    }
+    // Part 4: the submit no longer re-checks the PROVIDER's accounts — the
+    // buyer pays the platform's account (AdminPaymentDetailsCard), which is
+    // configuration rather than something a provider can leave empty, so
+    // there is no "nowhere to send money" state left to guard. The server
+    // gate (order-create + the availability request claim) is unchanged.
 
     setState(() {
       _submitting = true;
@@ -805,21 +778,19 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
                         _AvailabilityNotice(),
                         const SizedBox(height: 20),
                       ]                      else ...[
-                        // The provider's saved bank accounts, with a copy
-                        // button per value and the instruction that matters:
-                        // pay the seller, then upload proof. Directly below
-                        // them sit the reference field and the screenshot
-                        // upload — the three belong together. The card is
-                        // reachable only through the availability gate (the
-                        // server RPC refuses without an ACCEPTED request);
-                        // with no account it says so and offers "Find
-                        // another provider" — never a way to talk to the
-                        // seller first.
-                        PaymentAccountsCard(
-                          accounts: _accounts ?? PaymentAccounts.unreadable,
-                          loading: _accountsLoading,
-                          onFindAnother: _findAnotherProvider,
-                        ),
+                        // Part 4: the PLATFORM's account, never the
+                        // provider's. The card reads the administrator's
+                        // configured details (Admin → Payment Settings →
+                        // system_settings.admin_payment_details, through the
+                        // whitelisted public_app_settings RPC) with the
+                        // platform's Payment Methods rows as fallback, and
+                        // says the team will contact the buyer when neither
+                        // is configured. It sits directly above the
+                        // reference field and the screenshot upload — the
+                        // three belong together — and only ever inside the
+                        // availability gate, exactly where the provider
+                        // card used to render.
+                        const AdminPaymentDetailsCard(),
                         const SizedBox(height: 16),
                         BirrTextField(
                           label: 'Payment Reference (optional)',

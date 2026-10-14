@@ -13,6 +13,7 @@ import '../../core/utils/phone_formatter.dart';
 import '../../core/widgets/captcha_challenge_field.dart';
 import '../../core/widgets/google_sign_in_button.dart';
 import '../../core/widgets/primary_button.dart';
+import '../../core/widgets/system_banner.dart';
 import '../../core/widgets/birr_text_field.dart';
 import '../../core/utils/friendly_error.dart';
 import 'terms_policy_screen.dart';
@@ -22,7 +23,24 @@ enum SignupRole { user, vehicleProvider, serviceProvider }
 
 class SignupScreen extends ConsumerStatefulWidget {
   final SignupRole role;
-  const SignupScreen({super.key, required this.role});
+
+  /// Part 6: staff-assisted registration. A staff member registers a provider
+  /// on their behalf from the staff workspace (`/staff/register-provider`).
+  /// The only structural differences from self-service: the referral code is
+  /// REQUIRED and must resolve to an active staff code (that resolution is
+  /// exactly what makes the signup staff-assisted server-side —
+  /// `handle_new_user` keeps such a provider at PENDING_APPROVAL until an
+  /// administrator approves their documents), and the success step points at
+  /// the document upload instead of the dashboard. The CAPTCHA, the privacy
+  /// checkbox, the city and the trade picker are the same gates everyone
+  /// passes.
+  final bool assistedByStaff;
+
+  const SignupScreen({
+    super.key,
+    required this.role,
+    this.assistedByStaff = false,
+  });
 
   @override
   ConsumerState<SignupScreen> createState() => _SignupScreenState();
@@ -81,9 +99,11 @@ class _SignupScreenState extends ConsumerState<SignupScreen> {
   // is friction for nothing.
   bool _otpRequired = true;
 
-  // Terms & Privacy agreement (Behavior 5): required before the submit
-  // button enables. Acceptance is stored on the profile (0039) right after
-  // the account exists, with the version the user actually saw.
+  // Privacy Policy agreement: required before the submit button enables.
+  // Acceptance is stored on the profile (0039) right after the account
+  // exists, with the version the user actually saw. Part 1 of the rework
+  // names the POLICY the checkbox is about — the Privacy Policy, on the
+  // existing policy page at /terms — rather than the old umbrella phrase.
   bool _agreedToTerms = false;
 
   // Task 9: the document-type choice was removed from signup (it was a
@@ -124,17 +144,23 @@ class _SignupScreenState extends ConsumerState<SignupScreen> {
   }
 
   Future<void> _loadSignupRequirements() async {
-    // Both lookups run concurrently; neither blocks the other, and neither
-    // can fail the screen.
+    // Part 1 of the rework: registration requires a CAPTCHA unconditionally.
+    // The challenge is a real one (server-generated question, answer stays
+    // server-side, verified through `verify_captcha` before the account
+    // exists) — not a tick-box — and it is asked on every signup regardless
+    // of whether the email OTP gate is on, because the account-creation
+    // endpoint it throttles is the same either way. The server toggle
+    // (`captcha_required`) still exists for the login gate and appeals; the
+    // signup bar no longer depends on it. The OTP lookup is unchanged: the
+    // code screen is still shown exactly when the server asks for a code.
     final results = await Future.wait([
       CaptchaService.instance.isRequired(),
       OtpService.isRequiredAtSignup(),
     ]);
     if (!mounted) return;
-    final otpRequired = results[1];
     setState(() {
-      _otpRequired = otpRequired;
-      _captchaRequired = results[0] && otpRequired;
+      _otpRequired = results[1];
+      _captchaRequired = true;
     });
     if (_isProvider) await _loadProviderCategories();
   }
@@ -276,6 +302,19 @@ class _SignupScreenState extends ConsumerState<SignupScreen> {
                           color: Colors.white.withOpacity(0.85),
                         ),
                       ),
+                      if (widget.assistedByStaff) ...[
+                        const SizedBox(height: 6),
+                        Text(
+                          'Staff-assisted: this provider becomes active for '
+                          'trading once their documents are reviewed.',
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w500,
+                            height: 1.4,
+                            color: Colors.white.withOpacity(0.95),
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -353,12 +392,21 @@ class _SignupScreenState extends ConsumerState<SignupScreen> {
                                         children: [
                                           const Text('I agree to the ',
                                               style: AppTheme.bodyMedium),
+                                          // Part 1: the checkbox names the
+                                          // Privacy Policy and opens the
+                                          // existing policy page (/terms
+                                          // hosts the full Terms & Privacy
+                                          // Policy text). Required to
+                                          // proceed — the submit button
+                                          // below is disabled until it is
+                                          // ticked, and the server records
+                                          // the acceptance (accept_terms).
                                           GestureDetector(
                                             onTap: () =>
                                                 context.push('/terms',
                                                     extra: true),
                                             child: const Text(
-                                                'Terms & Privacy Policy',
+                                                'Privacy Policy',
                                                 style: TextStyle(
                                                     fontSize: 14,
                                                     fontWeight:
@@ -514,12 +562,25 @@ class _SignupScreenState extends ConsumerState<SignupScreen> {
     if (!_formKey.currentState!.validate()) return;
     if (!_agreedToTerms) {
       setState(() => _error =
-          'Please read and accept the Terms & Privacy Policy to continue.');
+          'Please read and accept the Privacy Policy to continue.');
       return;
     }
     if (_captchaRequired && _captchaId == null) {
       setState(() =>
           _error = 'Please complete the security check before continuing.');
+      return;
+    }
+    // Part 6: a staff-assisted signup is ONLY staff-assisted when the code
+    // resolves to an active staff member — that resolution (server-side, in
+    // handle_new_user) is what keeps the provider pending until their
+    // documents are approved. An unvalidated code would silently register an
+    // ordinary self-service provider, so it is refused here rather than
+    // guessed about downstream.
+    if (widget.assistedByStaff &&
+        (_referralHint == null || !_referralHint!.contains('✓'))) {
+      setState(() => _error =
+          'Enter YOUR staff referral code — it must validate — before '
+          'registering a provider on their behalf.');
       return;
     }
 
@@ -590,10 +651,14 @@ class _SignupScreenState extends ConsumerState<SignupScreen> {
             );
       }
 
-      // Admin approval is the account gate (email confirmation is disabled
-      // in Supabase Auth), so signUp() returns a session immediately and the
-      // handle_new_user() trigger has already created the profile in
-      // PENDING_APPROVAL status. Go straight to the waiting screen.
+      // Email confirmation is disabled in Supabase Auth, so signUp()
+      // returns a session immediately and handle_new_user() has already
+      // created the account — APPROVED on arrival for a self-service signup
+      // (migration 20261014000000; Part 1: no admin wait). The router does
+      // the right thing either way: an approved account lands on its
+      // dashboard, and a staff-assisted provider (still PENDING_APPROVED on
+      // the trading side) still signs in and is walked straight into the
+      // document upload below.
       final hasSession = Supabase.instance.client.auth.currentSession != null;
       if (!mounted) return;
 
@@ -619,7 +684,43 @@ class _SignupScreenState extends ConsumerState<SignupScreen> {
         // Non-fatal: the account itself was already created successfully.
       }
 
-      context.go('/pending-approval');
+      if (widget.assistedByStaff) {
+        // Part 6: the device is now signed in AS the newly created provider
+        // (signUp replaces the staff session — there is no client-side way to
+        // create an account WITHOUT taking the session), so the onboarding
+        // continues where it matters: the document upload. Approval of those
+        // documents is what activates the provider for trading; the staff
+        // member signs back into their own workspace from Profile → Sign out.
+        SystemBannerController.instance.show(
+          title: 'Provider registered',
+          message: 'Upload their identity documents now — the account becomes '
+              'active for trading once an administrator reviews them.',
+          duration: const Duration(seconds: 10),
+        );
+        context.go('/provider/documents');
+        return;
+      }
+
+      // Part 8: the welcome banner, immediately after a successful
+      // registration. The same welcome is written into the notifications
+      // panel by the signup trigger (notify_user_once in migration
+      // 20261014000000), so it survives the banner.
+      SystemBannerController.instance.show(
+        title: 'Welcome to Aliob!',
+        message: _isProvider
+            ? 'Your provider account is ready. Set up your business profile '
+                'and post your first product.'
+            : 'Your account is ready. Start exploring Aliob.',
+      );
+      // Straight to the role's dashboard — Part 1: no pending queue for a
+      // self-service signup. If the database has not yet run the
+      // auto-approve migration, the router bounces this to
+      // /pending-approval on its own; the screen never has to guess.
+      context.go(switch (widget.role) {
+        SignupRole.user => '/user',
+        SignupRole.vehicleProvider => '/vehicle',
+        SignupRole.serviceProvider => '/provider',
+      });
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -814,12 +915,27 @@ class _SignupScreenState extends ConsumerState<SignupScreen> {
           ),
           const SizedBox(height: 16),
           BirrTextField(
-            label: 'Referral Code (optional)',
-            hint: 'From the sales person who signed you up',
+            label: widget.assistedByStaff
+                ? 'Your Staff Referral Code *'
+                : 'Referral Code (optional)',
+            hint: widget.assistedByStaff
+                ? 'Your own code — this marks the signup as staff-assisted'
+                : 'From the sales person who signed you up',
             controller: _referralController,
             textCapitalization: TextCapitalization.characters,
             textInputAction: TextInputAction.next,
             onChanged: (_) => _lookupReferral(),
+            validator: widget.assistedByStaff
+                ? (v) {
+                    if (v == null || v.trim().isEmpty) {
+                      return 'Your staff code is required';
+                    }
+                    if (_referralHint == null || !_referralHint!.contains('✓')) {
+                      return 'This code does not match an active staff member';
+                    }
+                    return null;
+                  }
+                : null,
           ),
           if (_referralHint != null) ...[
             const SizedBox(height: 4),

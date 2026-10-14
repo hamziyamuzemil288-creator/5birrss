@@ -16,8 +16,16 @@ import 'product_buy_button.dart';
 /// way — the search list dropped the `/kg` an item was actually priced by, and
 /// the category grid printed a bare number with no currency at all. One
 /// formatter means the same listing cannot quote two prices.
+///
+/// The number it prints is the PUBLIC price — the generated
+/// `products.display_price` column (migration 20261014000002: provider price
+/// + 5 + 1.9%), which every public read now carries. `price` (the provider's
+/// own raw number) is only read as a fallback for a database that has not run
+/// that migration yet, so a stale backend shows what it always showed rather
+/// than an empty card. The markup is NEVER computed here: one column, one
+/// arithmetic, one source.
 String listingPriceLabel(Map<String, dynamic> row) {
-  final price = (row['price'] as num?)?.toDouble();
+  final price = ((row['display_price'] ?? row['price']) as num?)?.toDouble();
   if (price == null) return '';
   final currency = (row['currency'] as String?) ?? 'ETB';
   final unit = row['unit'] as String?;
@@ -186,7 +194,7 @@ class ProductCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final img = _data.imageUrl;
+    final String? img = _data.data.imageUrl;
     // A card with no photo is the TEXT-ONLY card: name, price and the same
     // action, with no image area at all. That is what a photo-less listing
     // renders as on its own provider's page — the one surface allowed to show
@@ -237,16 +245,33 @@ class ProductCard extends StatelessWidget {
                   child: ClipRRect(
                     borderRadius: const BorderRadius.vertical(
                         top: Radius.circular(12)),
-                    // Full-bleed cover: the frame is the whole image
-                    // area of the card, so a portrait photo is centred
-                    // and cropped by the frame rather than floating at
-                    // its intrinsic size inside it.
+                    // CONTAIN, not cover — the Part 7 fix.
+                    //
+                    // The report was "public product images are cropped / cut
+                    // off", and the cause was the fit, not the frame: the
+                    // image area is an Expanded slot whose height depends on
+                    // the card width, the grid's childAspectRatio and the
+                    // device, so its aspect ratio matches no particular
+                    // photo. `cover` fills that frame by cutting whatever
+                    // falls outside it — a tall shop-front loses its top and
+                    // bottom, a wide one loses its sides — on every screen
+                    // that renders this card.
+                    //
+                    // `contain` shows the WHOLE photo, centred, letterboxed
+                    // against the card's own tint — nothing is cut, on any
+                    // aspect ratio. The frame, the grid geometry and the
+                    // rounded clip are unchanged, so the card layout every
+                    // grid depends on is identical; only what is drawn inside
+                    // the image area changed. This is the ONE shared card, so
+                    // home, search, category, trending-mixed feed and the
+                    // provider gallery all change together — there is no
+                    // second card to keep in sync.
                     child: SizedBox(
                       width: double.infinity,
                       height: double.infinity,
                       child: CachedNetworkImage(
-                        imageUrl: img!,
-                        fit: BoxFit.cover,
+                        imageUrl: img,
+                        fit: BoxFit.contain,
                         alignment: Alignment.center,
                         filterQuality: FilterQuality.medium,
                         placeholder: (_, __) => const Center(

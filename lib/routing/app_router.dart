@@ -34,6 +34,7 @@ import '../features/provider/provider_orders_screen.dart';
 import '../features/about/about_us_screen.dart';
 import '../features/provider/provider_category_settings_screen.dart';
 import '../features/provider/provider_business_profile_screen.dart';
+import '../features/provider/provider_documents_screen.dart';
 import '../features/admin/admin_category_fields_screen.dart';
 import '../features/provider/provider_subscription_screen.dart';
 import '../features/provider/provider_payment_methods_screen.dart';
@@ -72,6 +73,7 @@ import '../features/admin/admin_order_payments_screen.dart';
 import '../features/admin/admin_staff_assignment_screen.dart';
 import '../features/admin/admin_role_permissions_screen.dart';
 import '../features/admin/admin_settings_screen.dart';
+import '../features/admin/admin_platform_settings_screen.dart';
 import '../features/admin/admin_app_releases_screen.dart';
 import '../features/admin/fee_settings_screen.dart';
 import '../features/admin/admin_content_control_screen.dart';
@@ -314,12 +316,22 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         path: '/signup/:role',
         builder: (_, state) {
           final r = state.pathParameters['role']!;
-          return SignupScreen(role: switch (r) {
-            'user' => SignupRole.user,
-            'vehicle' => SignupRole.vehicleProvider,
-            'service' => SignupRole.serviceProvider,
-            _ => SignupRole.user,
-          });
+          // Part 6: `?assisted=1` is the staff door — the staff workspace's
+          // "Register a provider" action pushes it, and the flag makes the
+          // form demand a VALID staff referral code (the server keeps the
+          // provider pending for document review through that code) and walk
+          // the pair straight into /provider/documents afterwards. Ordinary
+          // self-service signups never carry the parameter.
+          final assisted = state.uri.queryParameters['assisted'] == '1';
+          return SignupScreen(
+            role: switch (r) {
+              'user' => SignupRole.user,
+              'vehicle' => SignupRole.vehicleProvider,
+              'service' => SignupRole.serviceProvider,
+              _ => SignupRole.user,
+            },
+            assistedByStaff: assisted,
+          );
         },
       ),
       GoRoute(path: '/admin-login', builder: (_, __) => const AdminLoginScreen()),
@@ -473,6 +485,13 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       GoRoute(
           path: '/provider/business',
           builder: (_, __) => const ProviderBusinessProfileScreen()),
+      // Parts 1 and 8: document verification is voluntary and self-serve —
+      // the provider's own "Verify Documents" screen (Settings → Verify
+      // Documents), and the first stop after a staff-assisted signup. Nothing
+      // else routes here as a gate: posting and trading never require it.
+      GoRoute(
+          path: '/provider/documents',
+          builder: (_, __) => const ProviderDocumentsScreen()),
       GoRoute(path: '/provider/orders', builder: (_, __) => const ProviderOrdersScreen()),
       // Provider-side buyer-payment verification. A payment from a buyer INTO
       // the provider's own account may be confirmed by the provider (who can
@@ -581,6 +600,19 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       // The generic settings editor: fees, thresholds, the points awards and
       // the points-to-birr rate, editable without a migration.
       GoRoute(path: '/admin/settings', builder: (_, __) => const AdminSettingsScreen()),
+      // Parts 3 and 4: the platform's contact number and payment account, as
+      // data. Admin → Contact Settings and Admin → Payment Settings are two
+      // doors into this one screen (`initialSection` focuses the right half);
+      // every buyer-facing card reads the values through
+      // public_app_settings() (migration 20261014000003).
+      GoRoute(
+          path: '/admin/platform-settings',
+          builder: (_, s) {
+            final section = s.uri.queryParameters['section'];
+            return AdminPlatformSettingsScreen(
+              initialSection: section == 'payment' ? 'payment' : 'contact',
+            );
+          }),
       // Item I: the forced-update policy — latest/minimum build per platform,
       // the store link, the per-locale message, the force switch, and the
       // "notify all users" blast. Admin-only; the server gates every write on

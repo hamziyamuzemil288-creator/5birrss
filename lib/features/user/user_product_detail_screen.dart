@@ -251,8 +251,8 @@ class _State extends ConsumerState<UserProductDetailScreen> {
                   const SizedBox(height: 8),
                   Text(
                       isUnitPriced
-                          ? '${_fmtNum((p['price'] as num?)?.toDouble() ?? 0)} ${p['currency'] ?? 'ETB'}/$unitWord'
-                          : '${p['price']} ${p['currency'] ?? 'ETB'}',
+                          ? '${_fmtNum(((p['display_price'] ?? p['price']) as num?)?.toDouble() ?? 0)} ${p['currency'] ?? 'ETB'}/$unitWord'
+                          : '${(p['display_price'] ?? p['price']) ?? ''} ${p['currency'] ?? 'ETB'}',
                       style: const TextStyle(
                           fontSize: 20,
                           fontWeight: FontWeight.w700,
