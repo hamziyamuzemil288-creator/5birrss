@@ -523,6 +523,62 @@ FIXES: list[tuple[str, str, str, tuple[str, ...], tuple[str, ...], tuple[str, ..
             "SELECT prosrc INTO",
         ),
     ),
+    (
+        # The self-approval probe went vacuous the day 20261014000000 made a
+        # self-service signup APPROVED at birth. The probe builds its fixture
+        # by inserting into `auth.users`, which fires handle_new_user(); the
+        # trigger now creates that profile APPROVED, so the probe's own
+        # `INSERT ... 'PENDING_APPROVAL' ON CONFLICT (id) DO NOTHING` became a
+        # silent no-op and the row it attacked was already APPROVED. Its attack
+        # is a write of APPROVED over APPROVED -- a change of no status, so
+        # prevent_profile_self_privilege_escalation() was right to stay quiet --
+        # and the probe read the row back, saw APPROVED, and reported "the guard
+        # did not fire". Connectivity CI #5 was that false finding against a
+        # guard that works.
+        #
+        # 20261014000006 writes the pre-state itself, reads it back and requires
+        # it, and asserts the guard trigger is attached. This entry pins all
+        # three so a later restatement cannot quietly restore the vacuous
+        # fixture, and it pins the absence of the exact broken sequence.
+        "assert_profile_self_approval_is_refused",
+        "20260927000028",
+        "20261014000006",
+        # The vocabulary the repair is allowed to touch. `DELETE` and `v_status`
+        # are the fixture write and the read-back; the pg_trigger names are the
+        # attachment check; `trg_profiles_security` names the guard itself; and
+        # the probe's own values line is the one whose trailing
+        # `ON CONFLICT (id) DO NOTHING` is the defect being dropped.
+        (
+            "DELETE",
+            "v_status",
+            "NOT EXISTS",
+            "pg_trigger",
+            "pg_class",
+            "tgname",
+            "regclass",
+            "tgisinternal",
+            "tgenabled",
+            "trg_profiles_security",
+            "Self Approval Probe",
+        ),
+        (
+            # the pre-state is written instead of inherited
+            "DELETE FROM public.profiles WHERE id = v_user",
+            # ... read back and required, rather than assumed
+            "IF v_status IS DISTINCT FROM 'PENDING_APPROVAL' THEN",
+            # ... and the trigger that is supposed to refuse the attack has to
+            # be attached, or the probe would blame the guard's body
+            "IF NOT EXISTS (SELECT 1",
+            "'trg_profiles_security is not attached to public.profiles",
+        ),
+        (
+            # the silent no-op that let the fixture stay APPROVED, which is the
+            # whole defect: the insert looked like it set the pre-state and
+            # instead did nothing at all
+            "VALUES (v_user, 'Self Approval Probe', 'PENDING_APPROVAL') "
+            "ON CONFLICT (id) DO NOTHING;",
+        ),
+    ),
 ]
 
 
