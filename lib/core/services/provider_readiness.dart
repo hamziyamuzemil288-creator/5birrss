@@ -111,16 +111,12 @@ class ProviderReadiness {
       route: '/provider/business',
       action: 'Open your business profile',
     ),
-    // Item 6: enforced by create_provider_product and the products policy
-    // (NOT by provider_fulfilment_blockers — that function is shared with
-    // ride claiming), so load() reads the table and this entry gives the
-    // banner its sentence and its destination.
-    'NO_PAYMENT_ACCOUNT': (
-      phrase: 'you have no payment account, so buyers have nowhere to send '
-          'money — your listings are hidden until you add one',
-      route: '/provider/payment-methods',
-      action: 'Add a payment account',
-    ),
+    // There is deliberately no 'NO_PAYMENT_ACCOUNT' remedy any more: the
+    // server stopped raising it in 20261015000010 (the platform collects the
+    // payment, so a provider has no account to add), and a remedy left behind
+    // would send a provider to a screen that no longer accepts one — the
+    // generic fallback below is the honest answer if a stale server ever does
+    // send the code.
   };
 
   /// An unrecognised code still gets a sentence.
@@ -155,21 +151,10 @@ class ProviderReadiness {
           .map((e) => e.toString())
           .where((e) => e.isNotEmpty)
           .toList();
-      // Item 6: the account rule lives in create_provider_product and the
-      // products policy — NOT in provider_fulfilment_blockers (that fn is
-      // shared with ride claiming) — so the banner reads the table itself
-      // to explain why listings are hidden. A failed read adds nothing:
-      // unknown must never invent a blocker.
-      try {
-        final rows = await Supabase.instance.client
-            .from('provider_payment_methods')
-            .select('id')
-            .eq('provider_id', providerId)
-            .eq('is_active', true)
-            .limit(1)
-            .timeout(const Duration(seconds: 12));
-        if ((rows as List).isEmpty) reasons.add('NO_PAYMENT_ACCOUNT');
-      } catch (_) {}
+      // The payment-account rule that used to be read here (and appended as
+      // NO_PAYMENT_ACCOUNT) is gone from the server as of 20261015000010, and
+      // with it the read: `provider_fulfilment_blockers()` is now the whole
+      // answer, which is what this class was always meant to report.
       return ProviderReadiness(
         reasons: reasons,
         checked: true,

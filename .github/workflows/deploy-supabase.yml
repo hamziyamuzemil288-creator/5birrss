@@ -47,11 +47,10 @@ jobs:
         with:
           version: 2.117.0
 
-      - name: Link project
-        run: supabase link --project-ref "$SUPABASE_PROJECT_REF"
-
-      # Fail loudly on missing/empty secrets. GitHub maps a missing secret to
-      # an EMPTY string, so [ -z ] is the reliable check — not shell unset.
+      # Fail early and explicitly before any Supabase CLI command. GitHub
+      # maps a missing secret to an EMPTY string, so [ -z ] is the reliable
+      # check — not shell `unset`. This is the message you saw: the CLI wants
+      # SUPABASE_ACCESS_TOKEN long before it cares about anything else.
       - name: Verify required secrets are present
         run: |
           set -eu
@@ -63,6 +62,9 @@ jobs:
             fi
           done
           exit $missing
+
+      - name: Link project
+        run: supabase link --project-ref "$SUPABASE_PROJECT_REF"
 
       # WHY STAGING IS ALWAYS RUN: the CLI identifies migrations by the
       # numeric prefix ONLY. `supabase_migrations.schema_migrations` has

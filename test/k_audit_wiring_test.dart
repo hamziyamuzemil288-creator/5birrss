@@ -132,10 +132,14 @@ void main() {
     });
 
     test('the three write paths use it, not the bare sentence', () {
+      // The third write path is the one that places the order, and that moved
+      // to the payment step when the checkout became the fulfilment screen: the
+      // checkout now only READS (the availability check, best-effort by design),
+      // so the reference code has to be on the screen that actually writes.
       for (final path in [
         'lib/features/user/user_ride_request_screen.dart',
         'lib/features/provider/provider_product_form_screen.dart',
-        'lib/features/user/user_checkout_screen.dart',
+        'lib/features/user/user_payment_screen.dart',
       ]) {
         expect(read(path), contains('friendlyErrorWithRef'),
             reason: '$path must show a reference code on failure');

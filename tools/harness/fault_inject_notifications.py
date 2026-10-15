@@ -22,7 +22,11 @@ MIGRATIONS = ROOT / "supabase/migrations"
 MUTATIONS = [
     (
         "provider stops being notified when an order payment is verified",
-        "20260927000088_order_and_ride_receipts.sql",
+        # __LAST__: 20260927000133 restates fn_notify_order_status_change, so a
+        # mutation written into the 0088 copy changed nothing the harness reads
+        # and this case reported MISS while proving nothing. Resolved through
+        # the winning definition, like every other body mutation here.
+        "__LAST__:fn_notify_order_status_change",
         "    PERFORM public.notify_user_once(\n"
         "      'order-payment-received:' || NEW.id::text,",
         "    PERFORM public.notify_user_once(\n"
@@ -115,7 +119,10 @@ MUTATIONS = [
     ),
     (
         "the welcome stops being sent on provider approval",
-        "20260927000087_welcome_on_approval.sql",
+        # __LAST__: 20260927000111 restates approve_provider, so the mutation
+        # written into the 0087 copy changed nothing the harness reads and this
+        # case reported MISS while proving nothing.
+        "__LAST__:approve_provider",
         "  PERFORM public.notify_user_once(\n"
         "    'provider-approved:' || p_provider_id::text,",
         "  PERFORM public.notify_user_once(\n"

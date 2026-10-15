@@ -19,8 +19,26 @@ The defects, in the order the check is able to see them:
 
 Every check in static_checks reads file contents through the single `_read`
 helper, so overriding that one function runs the real check code against a
-patched string. `last_migration_defining` walks the migrations, so the patch
-has to be installed there too, not only on `_read`.
+patched string. `last_migration_defining` and `function_body` also read through
+it, so the patch reaches the "last definition" walk as well -- which is exactly
+the walk that has to be honoured.
+
+WHY EVERY DEFINING MIGRATION IS PATCHED, NOT ONE FILE:
+The check reads the LAST definition in filename order, because that is the one
+the live database runs. Two cases here used to patch only
+`20260927000130_a_submission_tells_both_sides.sql`, whose
+`on_registration_submitted()` was restated by
+`20261014000000_self_service_registration_is_immediately_active.sql`. The
+mutation landed nowhere, the check read the NEWER body, and both cases printed
+"the check stayed GREEN" -- a harness defect that looked exactly like a real
+coverage gap and proved nothing about the fan-out either way. The same trap hit
+`falsify_notifications.py` case D when 20261006000005 restated `claim_ride`, and
+it is silent, which is what makes it dangerous.
+
+So each case now declares which function's AUTHORITATIVE body it must land on,
+the mutation is applied to every migration that defines it, and a mutation that
+changes nothing in the winning file is reported as a stale needle instead of
+being allowed to pass quietly.
 """
 from __future__ import annotations
 
@@ -32,13 +50,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import static_checks as sc  # noqa: E402
 
 MIG = sc.REGISTRATION_MIGRATION
-TARGET = str(sc.MIGRATIONS / MIG).replace("\\", "/")
 
 
 def _drop_trigger(text: str) -> str:
     """The shipped state: the notice exists, nothing fires it.
 
-    The CREATE TRIGGER statement is DELETED, not commented out. Commenting it
+    The CREATE TRIGGER statement is DELETED, not commented out. Commenting
     would be a no-op against the check, which strips comments before it looks
     -- `-- CREATE TRIGGER x` strips back to `CREATE TRIGGER x`, so a
     comment-based mutation tests nothing and this falsifier would have
@@ -97,61 +114,87 @@ def _drop_the_enum_value(text: str) -> str:
     return text.replace("'REGISTRATION_RECEIVED'", "'SOME_TYPE_THAT_IS_NOT_THERE'")
 
 
-CASES: list[tuple[str, callable, str]] = [
+# (label, mutate, the assertion that must name it, the function whose
+#  authoritative body it must land on -- None means the registration migration
+#  itself is where the mutated text lives, as for the trigger and the enum).
+CASES: list[tuple[str, object, str, str | None]] = [
     ("the trigger is never created, so the notice never fires",
      _drop_trigger,
-     "trg_registration_submitted"),
+     "trg_registration_submitted",
+     None),
     ("the reviewer fan-out is emptied but the recipient set is still named",
      _empty_the_fanout,
-     "does not iterate the recipient set"),
+     "does not iterate the recipient set",
+     "on_registration_submitted"),
     ("the recipient set is renamed out from under a loop that survives",
      _unname_the_recipient_set,
-     "never calls registration_review_recipients"),
+     "never calls registration_review_recipients",
+     "on_registration_submitted"),
     ("unsuspend_provider reactivates an account without telling the person",
      _drop_the_reactivation_notice,
-     "reactivates an account without telling the person"),
+     "reactivates an account without telling the person",
+     "unsuspend_provider"),
     ("unsuspend_provider loses a guard clause in the same restatement",
      _drop_a_guard_clause,
-     "has lost its city scope"),
+     "has lost its city scope",
+     "unsuspend_provider"),
     ("the notification is written with a type that is not the enum member",
      _drop_the_enum_value,
-     "REGISTRATION_RECEIVED"),
+     "REGISTRATION_RECEIVED",
+     None),
 ]
 
 
-def with_migration(text: str | None) -> list[str]:
-    """Run the real check with the registration migration reading as `text`."""
+def defining_migrations(fn: str) -> list[Path]:
+    """Every migration that defines public.<fn>(), in apply order."""
+    pattern = re.compile(
+        r"FUNCTION\s+public\.%s\s*\(" % re.escape(fn), re.IGNORECASE)
+    return [p for p in sc.migration_files() if pattern.search(sc._read(p))]
+
+
+def patches_for(mutate, fn: str | None, real: str) -> dict[str, str]:
+    """`{filename: mutated source}` for every file the mutation must cover.
+
+    The registration migration always, plus every migration defining `fn` when
+    a function is named. `real` is reused for MIG rather than re-read, so the
+    caller's already-mutated copy is never double-applied.
+    """
+    names = {MIG}
+    if fn is not None:
+        names |= {p.name for p in defining_migrations(fn)}
+    out: dict[str, str] = {}
+    for name in names:
+        text = real if name == MIG else sc._read(sc.MIGRATIONS / name)
+        out[name] = mutate(text)
+    return out
+
+
+def winning_file(fn: str | None) -> str:
+    """The migration whose text the check actually reads for this case."""
+    if fn is None:
+        return MIG
+    path, _ = sc.last_migration_defining(fn)
+    return path.name if path is not None else MIG
+
+
+def with_patches(patches: dict[str, str], check):
+    """Run the real check with the named migrations reading as their patch."""
     real_read = sc._read
-    real_last = sc.last_migration_defining
 
     def _read(path: Path) -> str:
         try:
-            if str(path).replace("\\", "/").endswith(TARGET) and text is not None:
-                return text
+            name = Path(str(path).replace("\\", "/")).name
         except Exception:
-            pass
+            name = ""
+        if name in patches:
+            return patches[name]
         return real_read(path)
 
-    def _last(name: str):
-        if text is not None and name == "unsuspend_provider":
-            # The restated body lives in the same file, so a patched read has
-            # to be visible to the "last definition" walk as well.
-            from static_checks import function_body
-            body = function_body(_strip(text), name)
-            if body:
-                return Path(MIG), body
-        return real_last(name)
-
-    def _strip(src: str) -> str:
-        return sc._strip_comments(src)
-
     sc._read = _read
-    sc.last_migration_defining = _last
     try:
-        return sc.check_registration_notifications_are_wired()
+        return check()
     finally:
         sc._read = real_read
-        sc.last_migration_defining = real_last
 
 
 def main() -> int:
@@ -161,8 +204,19 @@ def main() -> int:
         return 1
 
     failures = 0
-    for label, mutate, expect in CASES:
-        problems = with_migration(mutate(real))
+    for label, mutate, expect, fn in CASES:
+        patches = patches_for(mutate, fn, real)
+        winner = winning_file(fn)
+        if patches.get(winner) == sc._read(sc.MIGRATIONS / winner):
+            print("[FAIL] the mutation for %r changes nothing in %s, the "
+                  "migration whose definition WINS -- the needle is stale, so "
+                  "this case would have gone green while proving nothing"
+                  % (label, winner))
+            failures += 1
+            continue
+
+        problems = with_patches(
+            patches, sc.check_registration_notifications_are_wired)
         if not problems:
             print("[FAIL] the check stayed GREEN when %s" % label)
             failures += 1
@@ -180,9 +234,11 @@ def main() -> int:
             if expect in p:
                 print("         - " + p)
 
-    if with_migration(None):
+    real_problems = with_patches(
+        {}, sc.check_registration_notifications_are_wired)
+    if real_problems:
         print("[FAIL] the real %s is still red" % MIG)
-        for p in with_migration(None):
+        for p in real_problems:
             print("         - " + p)
         return 1
     print("[ ok ] the real %s is green" % MIG)

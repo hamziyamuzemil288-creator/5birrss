@@ -296,7 +296,7 @@ class _UserSearchScreenState extends State<UserSearchScreen> {
                               // since 20261011000001 for exactly this, so the
                               // card asks the same question every other surface
                               // asks and gets the same verb.
-                              listingType: p['listing_type'] as String?,
+                              listingType: (p['listing_type'] as String?) ?? '',
                               imageUrl: path.isEmpty
                                   ? null
                                   : Supabase.instance.client.storage

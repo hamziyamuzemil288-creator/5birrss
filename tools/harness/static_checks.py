@@ -2243,8 +2243,8 @@ def check_payment_screenshots_are_downscaled() -> list[str]:
         ("recharge_screen.dart (payment-screenshots, 5MB)",
          LIB / "features" / "wallet" / "recharge_screen.dart",
          ["_pickScreenshot"], "single"),
-        ("user_checkout_screen.dart (payment-proofs)",
-         LIB / "features" / "user" / "user_checkout_screen.dart",
+        ("user_payment_screen.dart (payment-proofs)",
+         LIB / "features" / "user" / "user_payment_screen.dart",
          ["_pickScreenshot", "_pickNationalId"], "single"),
         ("user_order_detail_screen.dart (payment-proofs)",
          LIB / "features" / "user" / "user_order_detail_screen.dart",
@@ -7238,17 +7238,25 @@ def check_registration_notifications_are_wired() -> list[str]:
     #    staff leaves the person who applied in silence, which is the half
     #    that matters most to them.
     for fn in ("on_registration_submitted", "on_registration_resubmitted"):
-        target, body = last_migration_defining(fn)
+        target, src = last_migration_defining(fn)
         if target is None:
             problems.append("%s is undefined" % fn)
             continue
-        if "notify_user_safe" not in body.lower():
+        # THE BODY, not the file. 20260927000130 and 20261014000000 each define
+        # several notifying functions, so a whole-file search for
+        # notify_user_safe is satisfied by a neighbouring function's call after
+        # THIS one's has been deleted. That is not hypothetical: the falsifier
+        # reported a false green over an account that came back silently
+        # exactly that way, and a check a neighbour can satisfy is not a check
+        # (same reason function_body strips comments).
+        if "notify_user_safe" not in function_body(src, fn).lower():
             problems.append(
                 "%s: %s() writes no notification, so the event is silent"
                 % (target.name, fn))
 
-    target, submitted = last_migration_defining("on_registration_submitted")
+    target, src = last_migration_defining("on_registration_submitted")
     if target is not None:
+        submitted = function_body(src, "on_registration_submitted")
         # The reviewer fan-out is reached through the recipient set, and a
         # mention of the name is not a call: the falsifier plants the reference
         # with the loop emptied.
@@ -7275,11 +7283,15 @@ def check_registration_notifications_are_wired() -> list[str]:
     # 4. unsuspend_provider: guarded AND telling. Both halves, because a
     #    restatement that dropped the guard is caught elsewhere and one that
     #    dropped the notice is caught nowhere.
-    target, unsuspend = last_migration_defining("unsuspend_provider")
+    target, src = last_migration_defining("unsuspend_provider")
     if target is None:
         problems.append("unsuspend_provider is undefined")
     else:
-        low = unsuspend.lower()
+        # Body-scoped for the same reason as the two triggers above: this file
+        # also defines on_registration_submitted and on_registration_resubmitted,
+        # and either one's notify_user_safe call would otherwise keep this
+        # green while the reactivation notice is gone.
+        low = function_body(src, "unsuspend_provider").lower()
         for clause, why in (
             ("admin_can('registrations')", "its permission check"),
             ("staff_is_action_manager()", "its action-manager check"),
@@ -8351,8 +8363,16 @@ def check_bank_accounts_are_enforced() -> list[str]:
         default) and the scan triggers on the four buyer-readable text
         surfaces;
       * the cleanup UPDATE that makes the existing bad rows inactive;
-      * the client: bank picker instead of a free-text name, the bounded
-        reads that end the endless spinner, the friendly codes.
+      * the admin-side bank editor that owns the banks table (the length and
+        prefix rules the trigger checks against), and the bounded reads that
+        end the endless spinner.
+
+    The PROVIDER's own account form is deliberately gone (Part 13): every
+    buyer payment goes to the payment account the platform publishes, so a
+    provider has no account of their own to enter, bank-pick, cap at three or
+    mark as default. The provider-side assertions below are therefore inverted
+    — they pin that the form does NOT come back — while every SERVER rule
+    stays exactly as it was, because the table and its trigger remain.
     """
     problems: list[str] = []
     mig = ROOT / "supabase" / "migrations" / "20261006000007_bank_accounts_only.sql"
@@ -8404,22 +8424,41 @@ def check_bank_accounts_are_enforced() -> list[str]:
     screen = _dart_without_comments(
         _read(LIB / "features" / "provider" /
               "provider_payment_methods_screen.dart"))
-    # Forbidden: the free-text name field is how Telebirr / CBE-Birr rows
-    # got in — a bank PICKER is the only name source allowed.
-    if "Name (shown to buyers)" in screen:
-        problems.append(
-            "payment_methods screen: the free-text name field is back — "
-            "that is how Telebirr/CBE-Birr rows got in")
+    # The provider-side form must NOT come back. Both spellings of the free-text
+    # name field are pinned, because that field is how Telebirr / CBE-Birr rows
+    # got in and the account form itself is what Part 13 removed.
     for needle, why in (
-        ("_bankField", "the form no longer picks a bank from the banks table"),
-        ("PaymentMethodsService.kTimeout",
-         "the reads are unbounded again — the endless spinner"),
+        ("Name (shown to buyers)",
+         "the free-text name field is back — that is how Telebirr/CBE-Birr "
+         "rows got in"),
+        ("_bankField",
+         "the provider bank-account form is back on a screen whose account "
+         "number nothing collects any more"),
         ("Maximum of 3 accounts reached",
-         "the 3-account cap has no client-side explanation"),
-        ("Make default", "providers cannot choose their default account"),
+         "the provider 3-account cap UI is back with the form it belonged to"),
+        ("Make default",
+         "a provider can set a default payment account again — the flow "
+         "Part 13 removed"),
+        ("Add bank account",
+         "the provider is invited to add a bank account again"),
     ):
-        if needle not in screen:
+        if needle in screen:
             problems.append("payment_methods screen: %s" % why)
+    if "PaymentMethodsService.kTimeout" not in screen:
+        problems.append(
+            "payment_methods screen: the reads are unbounded again — the "
+            "endless spinner")
+
+    # The banks table still needs its editor: the admin one, which owns the
+    # length/prefix rules the trigger validates against.
+    admin_accounts = _dart_without_comments(
+        _read(LIB / "features" / "admin" /
+              "admin_payment_accounts_screen.dart"))
+    if "_banks" not in admin_accounts or "'banks'" not in admin_accounts:
+        problems.append(
+            "admin_payment_accounts_screen.dart: the admin-side bank editor no "
+            "longer reads the banks table, so the length/prefix rules the "
+            "trigger enforces have no editor")
 
     service = _dart_without_comments(
         _read(LIB / "core" / "services" / "payment_methods_service.dart"))
@@ -8465,51 +8504,93 @@ def check_bank_accounts_are_enforced() -> list[str]:
     return problems
 
 
-def check_posting_requires_a_payment_account() -> list[str]:
-    """No account, no listing — and the existing ones vanish from buyers.
+def check_posting_no_longer_requires_a_provider_account() -> list[str]:
+    """The platform collects the payment, so the account rule is GONE.
 
-    Item 6's three halves (each one missing reopens the hole):
-      * server: create_provider_product raises NO_PAYMENT_ACCOUNT,
-        products_public_read hides account-less providers' listings, and
-        search_products (SECURITY DEFINER, unreachable by policy) carries
-        the same predicate;
-      * client: the posting checklist has a THIRD step with a route, the
-        banner has a sentence and a destination for the code, and
-        friendly_error translates it;
-      * proof: the live assertion is registered in connectivity CI.
+    History, because the reversal is the whole point. 20261006000008 put the
+    same rule in three places, on the premise that the buyer sent money to the
+    seller's own bank account:
 
-    provider_fulfilment_blockers() must NOT contain the code: it is shared
-    with claim_ride (20261006000005 calls it), so folding it in would refuse
-    ride claims from drivers who never needed a payout account and break
-    assert_ride_claim_race_has_one_winner.
+      * create_provider_product raised NO_PAYMENT_ACCOUNT before the insert;
+      * products_public_read hid every listing of an account-less provider;
+      * search_products carried the same predicate (SECURITY DEFINER, so the
+        policy could not reach it).
+
+    The payment model changed: every buyer payment goes to the payment account
+    the platform publishes inside the app, and the provider is settled through
+    their wallet. A provider therefore has no account number to publish, and
+    Part 13 removed the app's flow for entering one — so the rule left behind
+    would refuse EVERY posting and hide EVERY listing, a total outage of the
+    marketplace rather than a missing feature.
+
+    What must hold now:
+      * server: none of the three carries the predicate any more, and the live
+        assertion Connectivity CI calls has been restated to prove THAT (the
+        name is kept because that is what the CI calls);
+      * client: the checklist is two steps with no route to the accounts
+        screen, and the readiness banner has no remedy pointing there;
+      * the wallet is untouched: balance, history and the funding flow stay.
     """
     problems: list[str] = []
     mig = ROOT / "supabase" / "migrations" / \
-        "20261006000008_posting_requires_payment_account.sql"
+        "20261015000010_the_platform_collects_so_no_provider_publishes_an_account.sql"
     if not mig.is_file():
-        return ["20261006000008_posting_requires_payment_account.sql is "
-                "missing — nothing enforces the account rule on publish"]
+        return [
+            "20261015000010_the_platform_collects_so_no_provider_publishes_an_"
+            "account.sql is missing — the account rule would still refuse "
+            "every posting on a platform that no longer collects an account "
+            "number"]
     sql = _read(mig)
 
     for needle, why in (
-        ("NO_PAYMENT_ACCOUNT",
-         "create_provider_product does not refuse without an account"),
         ("DROP POLICY IF EXISTS products_public_read",
          "the buyer-facing products policy is not amended — direct reads "
-         "still see listings that cannot be paid for"),
-        ("idx_provider_payment_methods_active",
-         "the policy comment lost the index note — check the EXISTS still "
-         "uses provider_payment_methods"),
+         "still hide every listing whose provider has no account"),
         ("CREATE OR REPLACE FUNCTION public.search_products",
-         "search_products is not restated, so the search screen shows "
-         "account-less providers (SECURITY DEFINER, policy-blind)"),
-        ("assert_posting_requires_payment_account",
-         "no live assertion proves the gate survived a later deploy"),
+         "search_products is not restated, so search shows nothing from a "
+         "provider without an account (SECURITY DEFINER, policy-blind)"),
+        ("is not fully removed",
+         "the live assertion is not restated to the new truth, so "
+         "Connectivity CI would fail against a correctly migrated database"),
     ):
         if needle not in sql:
-            problems.append("20261006000008: %s" % why)
+            problems.append(
+                "20261015000010: %s" % why)
 
-    # The shared blockers fn must stay out of it (ride claims).
+    # The predicate must be gone from the FUNCTION BODIES themselves, read
+    # through the same helper the restatement gate uses — not from the file's
+    # comments, which discuss the rule it removes.
+    for fn, banned, why in (
+        ("create_provider_product", "NO_PAYMENT_ACCOUNT",
+         "still refuses without a payment account, so no provider could "
+         "publish at all now that the app no longer collects one"),
+        ("search_products", "provider_payment_methods",
+         "still hides providers without a payment account, so every listing "
+         "would vanish from search"),
+    ):
+        target, src = last_migration_defining(fn)
+        if target is None:
+            problems.append("%s: no migration defines it" % fn)
+            continue
+        body = function_body(src, fn)
+        if banned in body:
+            problems.append(
+                "%s: %s() %s" % (target.name, fn, why))
+
+    # The policy: its latest definition must not carry the predicate either.
+    pol = re.search(
+        r"CREATE\s+POLICY\s+products_public_read\s+ON\s+public\.products"
+        r"[^;]*;", sql, re.IGNORECASE | re.DOTALL)
+    if pol is None:
+        problems.append(
+            "20261015000010 does not re-create products_public_read, so the "
+            "old policy still hides account-less providers' listings")
+    elif "provider_payment_methods" in pol.group(0):
+        problems.append(
+            "20261015000010: the re-created products_public_read still "
+            "requires a provider payment account")
+
+    # The shared blockers fn must still stay out of it (ride claims).
     b_target, b_src = last_migration_defining("provider_fulfilment_blockers")
     if b_target is not None:
         body = function_body(b_src, "provider_fulfilment_blockers")
@@ -8523,43 +8604,76 @@ def check_posting_requires_a_payment_account() -> list[str]:
 
     gate = _dart_without_comments(
         _read(LIB / "core" / "services" / "posting_gate.dart"))
+    if "static const int totalSteps = 2" not in gate:
+        problems.append(
+            "posting_gate.dart: the checklist does not count two steps — a "
+            "third, account-shaped step would be a row no screen can turn "
+            "green")
     for needle, why in (
-        ("paymentAccount", "the checklist has no third step"),
-        ("static const int totalSteps = 3",
-         "the progress line does not count three steps"),
+        ("paymentAccount",
+         "the checklist still carries the account step"),
+        ("'NO_PAYMENT_ACCOUNT'",
+         "the gate still reports the retired code"),
         ("'/provider/payment-methods'",
-         "the third step has no destination — a button that goes nowhere"),
-        ("table: 'provider_payment_methods'",
-         "the prompt does not watch the table, so adding an account leaves "
-         "the step red"),
+         "the checklist still routes a provider at the accounts screen"),
     ):
-        if needle not in gate:
+        if needle in gate:
             problems.append("posting_gate.dart: %s" % why)
 
     ready = _dart_without_comments(
         _read(LIB / "core" / "services" / "provider_readiness.dart"))
-    if "'NO_PAYMENT_ACCOUNT'" not in ready:
+    if "'NO_PAYMENT_ACCOUNT'" in ready:
         problems.append(
-            "provider_readiness.dart: no remedy for NO_PAYMENT_ACCOUNT — "
-            "the banner would print the raw code or stay silent while "
-            "listings are hidden")
-    if "provider_payment_methods" not in ready:
+            "provider_readiness.dart still carries a NO_PAYMENT_ACCOUNT "
+            "remedy — the banner would send a provider to a screen that no "
+            "longer accepts an account")
+    if "provider_payment_methods" in ready:
         problems.append(
-            "provider_readiness.dart never reads the accounts table, so the "
-            "banner cannot explain hidden listings")
+            "provider_readiness.dart still reads the accounts table for a "
+            "rule the server no longer has")
 
-    err = _dart_without_comments(_read(LIB / "core" / "utils" /
-                                       "friendly_error.dart"))
-    if "no_payment_account" not in err:
-        problems.append("friendly_error.dart has no matcher for "
-                        "no_payment_account")
+    # The provider screen must not offer the flow at all. The wallet parts of
+    # it are checked by name, because deleting the screen would be a "fix"
+    # that removes the balance and the funding flow with it.
+    prov = _dart_without_comments(_read(LIB / "features" / "provider" /
+                                        "provider_payment_methods_screen.dart"))
+    for needle, why in (
+        ("getProviderMethods",
+         "the screen still reads the provider's own accounts"),
+        ("createMethod", "the screen still offers to create an account"),
+        ("updateMethod", "the screen still offers to edit an account"),
+        ("deleteMethod", "the screen still offers to remove an account"),
+        ("Add bank account",
+         "the screen still invites a provider to add a bank account"),
+    ):
+        if needle in prov:
+            problems.append(
+                "provider_payment_methods_screen.dart: %s (Part 13 removes "
+                "the provider's own account flow entirely)" % why)
+    for needle, why in (
+        ("_walletBalanceCard", "the wallet balance card"),
+        ("_showAddFundsSheet", "the funding request flow"),
+    ):
+        if needle not in prov:
+            problems.append(
+                "provider_payment_methods_screen.dart: %s was removed — the "
+                "correction is to remove the account input ONLY" % why)
+
+    wallet = _dart_without_comments(
+        _read(LIB / "features" / "wallet" / "wallet_screen.dart"))
+    for needle in ("Current Balance", "Recent Transactions"):
+        if needle not in wallet:
+            problems.append(
+                "wallet_screen.dart lost %r — the provider wallet screen "
+                "itself is hands-off" % needle)
 
     conn = _read(ROOT / "tools" / "integration_test" /
                  "connectivity_test.dart")
     if "assert_posting_requires_payment_account" not in conn:
         problems.append(
             "connectivity_test.dart does not run "
-            "assert_posting_requires_payment_account()")
+            "assert_posting_requires_payment_account(), so nothing proves "
+            "the removal on the live database")
 
     return problems
 
@@ -8753,24 +8867,42 @@ def check_no_contact_before_payment() -> list[str]:
             "payment_accounts_card.dart: a provider name is back on the "
             "payment copy")
 
-    checkout = _dart_without_comments(
-        _read(LIB / "features" / "user" / "user_checkout_screen.dart"))
     # Part 4 of the rework: the buyer pays the PLATFORM's account, configured
     # in Admin → Payment Settings and rendered by AdminPaymentDetailsCard.
-    # The provider-account card is gone from checkout along with its
-    # "Find another provider" escape — that escape existed only because
-    # payment depended on ONE provider having an account, which is the
-    # dependency this rework closes.
-    if "AdminPaymentDetailsCard(" not in checkout:
+    #
+    # The card moved with the payment step: the fulfillment screen ends at
+    # CONTINUE TO PAYMENT and the account, the amount the buyer writes down
+    # and the proof upload are one screen further on. So the card is looked
+    # for where it is rendered now, AND the hand-off is checked — a checkout
+    # that neither renders the card nor opens the screen that does is exactly
+    # the failure this half of the check exists to catch, and it would read
+    # as green if only the move were followed.
+    #
+    # The provider-account ban stays on BOTH screens: the escape hatch this
+    # rework deleted ("Find another provider", the provider's own numbers)
+    # existed only because payment depended on one provider having an account.
+    payment_screen = _dart_without_comments(
+        _read(LIB / "features" / "user" / "user_payment_screen.dart"))
+    if "AdminPaymentDetailsCard(" not in payment_screen:
         problems.append(
-            "user_checkout_screen.dart: the checkout no longer renders "
+            "user_payment_screen.dart: the payment step no longer renders "
             "AdminPaymentDetailsCard, so the buyer is not pointed at the "
             "platform's configured account (Part 4)")
-    if "PaymentAccountsCard(" in checkout or \
-            "provider_payment_accounts" in checkout:
+    checkout = _dart_without_comments(
+        _read(LIB / "features" / "user" / "user_checkout_screen.dart"))
+    if "'/user/payment'" not in checkout:
         problems.append(
-            "user_checkout_screen.dart: a provider's payment account is "
-            "back on checkout — buyers pay the platform, never a provider")
+            "user_checkout_screen.dart: the checkout no longer opens "
+            "/user/payment, so the fulfillment screen is a dead end and the "
+            "platform account is unreachable from the flow (Part 4)")
+    for label, screen in (
+            ("user_checkout_screen.dart", checkout),
+            ("user_payment_screen.dart", payment_screen)):
+        if "PaymentAccountsCard(" in screen or \
+                "provider_payment_accounts" in screen:
+            problems.append(
+                "%s: a provider's payment account is back on the buyer's "
+                "path — buyers pay the platform, never a provider" % label)
 
     detail = _dart_without_comments(
         _read(LIB / "features" / "user" / "user_product_detail_screen.dart"))
@@ -9404,8 +9536,13 @@ def check_registration_rework_is_wired() -> list[str]:
          "PlatformContactCard()",
          why="Part 3/4: the order screen no longer shows the platform's "
              "payment account and platform support contact")
-    dart("features/user/user_checkout_screen.dart", "AdminPaymentDetailsCard(",
-         why="Part 4: checkout no longer renders the platform payment card")
+    dart("features/user/user_payment_screen.dart", "AdminPaymentDetailsCard(",
+         "_pickScreenshot",
+         why="Part 4: the payment step no longer renders the platform payment "
+             "card")
+    dart("features/user/user_checkout_screen.dart", "'/user/payment'",
+         why="Part 4: the fulfillment screen no longer hands off to the "
+             "payment step, so the platform account is unreachable")
     dart("features/admin/admin_availability_screen.dart", "respond_availability_request",
          "listingCoverUrl", "'APPROVE'",
          why="Part 5: the admin queue lost its answer action or the request "
@@ -9620,6 +9757,131 @@ def check_parts_9_to_11_are_wired() -> list[str]:
     return problems
 
 
+# ---------------------------------------------------------------------------
+# the payment step: its own screen, and a way to appeal from the money step
+# ---------------------------------------------------------------------------
+def check_payment_step_and_appeal_are_wired() -> list[str]:
+    """The checkout hands off to /user/payment, that screen owns the money, and
+    a problem at either step files a case the admin queue can act on.
+
+    Three halves, each of which can vanish on its own: the hand-off (checkout
+    decides how the order arrives and pushes the payment step), the money
+    screen (the platform's account, what the buyer wrote down, the proof
+    upload and the ONE order-create call), and the appeal door from the
+    transaction itself into `appeal_cases`, which is what the admin dashboard
+    badge counts. A version bump that moves one file and not the other is the
+    fourth thing checked, because the build constant and pubspec.yaml are what
+    the forced-update gate and Play both read.
+    """
+    problems: list[str] = []
+
+    def dart(rel: str, *needles: str, why: str) -> str:
+        text = _read(LIB / rel)
+        if not text:
+            problems.append("lib/%s is missing — %s" % (rel, why))
+            return text
+        code = _dart_without_comments(text)
+        for needle in needles:
+            if needle not in code:
+                problems.append("lib/%s: %s (no %r)" % (rel, why, needle))
+        return code
+
+    checkout = dart(
+        "features/user/user_checkout_screen.dart",
+        "'/user/payment'", "_continueToPayment", "AvailabilityNotice",
+        "_payableTotal",
+        why="the checkout no longer hands the settled basket to the payment "
+            "step, or lost the deferred-payment notice")
+    # The availability gate's backstop must survive the split: the checkout
+    # still replaces itself with the gate, and it is the screen that decides
+    # whether the payment step is deferred.
+    for needle in ("/user/availability", "pushReplacement"):
+        if checkout and needle not in checkout:
+            problems.append(
+                "lib/features/user/user_checkout_screen.dart: the availability "
+                "gate's backstop is gone (no %r)" % needle)
+
+    payment = dart(
+        "features/user/user_payment_screen.dart",
+        "AdminPaymentDetailsCard", "_pickScreenshot", "order-create",
+        "payment_proofs", "'/appeal?about=dispute'", "OrderDraft",
+        "paymentDeferred", "AvailabilityNotice", "user_documents",
+        why="the payment step lost the platform's account, the proof upload, "
+            "the order call, the appeal door, or the deferred-payment path")
+
+    # The price-writing section: the buyer writes what they sent, and it is
+    # recorded on the order rather than used as the price.
+    if payment:
+        for needle, why in (
+            ("Amount you paid",
+             "the price-writing section is gone, so a buyer has nowhere to say "
+             "what they transferred"),
+            ("Amount written by buyer",
+             "the written amount never reaches the order"),
+            ("Payment Reference",
+             "the payment reference field is gone"),
+        ):
+            if needle not in payment:
+                problems.append(
+                    "lib/features/user/user_payment_screen.dart: %s" % why)
+        # The written amount must not become the price.
+        if "payableTotal = _amountCtrl" in payment:
+            problems.append(
+                "lib/features/user/user_payment_screen.dart: the amount WRITTEN "
+                "by the buyer is being used as the order total — the server "
+                "prices the order")
+
+    # The order screen's door always knows which order it is about, so it is
+    # checked for BOTH halves: the push into the appeal queue and the order
+    # reference riding with it. The needle is the quoted route prefix rather
+    # than the bare `'/appeal?about=dispute'` literal, because a door that knows
+    # the transaction appends `&order=` to the same quote (the payment step uses
+    # the bare form only for the deferred case, where no order exists yet).
+    dart("features/user/user_order_detail_screen.dart",
+         "_appealCard", "'/appeal?about=dispute", "&order=",
+         why="an order with something wrong with it has no way to reach the "
+             "admin appeals queue, or reaches it without naming the order the "
+             "reviewer has to act on")
+
+    dart("core/widgets/availability_notice.dart", "AvailabilityNotice",
+         why="the shared deferred-payment notice was deleted, so checkout and "
+             "the payment step would each grow their own copy")
+
+    # The route that the hand-off pushes.
+    router = _read(LIB / "routing" / "app_router.dart")
+    if "'/user/payment'" not in router or "UserPaymentScreen" not in router:
+        problems.append(
+            "lib/routing/app_router.dart: /user/payment is not declared, so "
+            "CONTINUE TO PAYMENT pushes into nowhere")
+
+    # The appeal destination itself: the admin queue the door leads to.
+    if "'/admin/appeals'" not in router:
+        problems.append(
+            "lib/routing/app_router.dart: /admin/appeals is gone, so a filed "
+            "appeal has no admin queue")
+
+    # The version bump has to reach BOTH files the release reads.
+    pubspec = _read(ROOT / "pubspec.yaml")
+    build_const = _read(LIB / "core" / "app_build.dart")
+    m = re.search(r"^version:\s*(\d+\.\d+\.\d+)\+(\d+)\s*$", pubspec,
+                  re.MULTILINE)
+    if not m:
+        problems.append("pubspec.yaml has no version: x.y.z+N line")
+    else:
+        name, number = m.group(1), m.group(2)
+        if ("kAppVersionName = '%s'" % name) not in build_const:
+            problems.append(
+                "lib/core/app_build.dart: kAppVersionName does not match "
+                "pubspec.yaml's %s — the forced-update gate would report the "
+                "wrong version to the server" % name)
+        if ("kAppBuildNumber = %s" % number) not in build_const:
+            problems.append(
+                "lib/core/app_build.dart: kAppBuildNumber does not match "
+                "pubspec.yaml's +%s — the app would gate the wrong users" % number)
+
+    return problems
+
+
 CHECKS = [
     ("a listing carries its own type from its own category, and a booking "
      "behaves like a booking end to end",
@@ -9646,8 +9908,9 @@ CHECKS = [
      check_availability_gate_covers_every_checkout),
     ("payment accounts are bank-only, phone-free, capped at 3 and audited",
      check_bank_accounts_are_enforced),
-    ("no listing publishes, and no listing shows, without a payment account",
-     check_posting_requires_a_payment_account),
+    ("the platform collects the payment, so no listing needs a provider's "
+     "account number",
+     check_posting_no_longer_requires_a_provider_account),
     ("no contact, and no account number, before the payment exists",
      check_no_contact_before_payment),
     ("one Pending number, one bell, and a card for every waiting queue",
@@ -9772,6 +10035,10 @@ CHECKS = [
     ("Parts 9-11: every notification also pushes, the delivery fee is the ride "
      "fare, and a sold listing is hidden rather than deleted",
      check_parts_9_to_11_are_wired),
+    ("the payment step is its own screen with the platform account, the price "
+     "the buyer writes and the proof upload, and a problem reaches the admin "
+     "appeals queue from the transaction itself",
+     check_payment_step_and_appeal_are_wired),
 ]
 
 

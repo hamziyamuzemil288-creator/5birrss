@@ -45,7 +45,11 @@ class AboutUsScreen extends StatelessWidget {
                   'shops you buy from, the professionals you hire and the vehicles '
                   'you travel in onto one platform, so a single account works '
                   'whether you are ordering goods, booking a service or asking '
-                  'for a ride.',
+                  'for a ride. Every trade is mediated by the platform: buyers '
+                  'pay Aliob rather than a stranger, Aliob verifies the payment, '
+                  'and only then are the two sides introduced. Nobody has to '
+                  'chase a phone number or guess whether the other account can be '
+                  'trusted.',
             ),
             const SizedBox(height: 20),
             _section(
@@ -54,7 +58,8 @@ class AboutUsScreen extends StatelessWidget {
                   'marketplace — so customers stop chasing phone numbers and '
                   'providers stop depending on who happens to know them. Every '
                   'trade is ranked on its own terms, priced by its own category, '
-                  'and paid through the same wallet.',
+                  'paid through the platform, and settled through the provider\'s '
+                  'wallet.',
             ),
             const SizedBox(height: 20),
             const Text(
@@ -87,10 +92,16 @@ class AboutUsScreen extends StatelessWidget {
             const SizedBox(height: 20),
             _section(
               'How payments work',
-              'You top up a wallet, the platform takes its fee when a job is '
-                  'confirmed, and the provider is told every time money moves. '
-                  'Contact details are released only once a payment has been '
-                  'verified — that is the escrow promise the Terms describe.',
+              'Aliob handles the money itself. You pay into the payment account '
+                  'the platform publishes inside the app, and upload a '
+                  'screenshot of the transfer as proof. An administrator '
+                  'verifies that proof, and only then are contact details '
+                  'released so the two sides can complete the trade. The '
+                  'platform\'s fee is taken from the provider\'s wallet when the '
+                  'job is confirmed, and both sides are told every time money '
+                  'moves. Because the platform, not the seller, receives the '
+                  'payment, no provider has to publish a bank account for '
+                  'buyers to pay into.',
             ),
             const SizedBox(height: 20),
             const Text(
@@ -107,6 +118,11 @@ class AboutUsScreen extends StatelessWidget {
             // The Terms & Privacy Policy stays one tap away from here, so
             // repointing "About" at this screen does not make it harder to
             // find than it was.
+            // The Terms of Service and the policy that covers data are two
+            // different documents, so they are two rows rather than one tile
+            // that hides the Terms behind a policy title. Both are reachable
+            // from here, and both are mirrored on the public policy site that
+            // Play Console points at.
             Card(
               elevation: 0,
               color: AppTheme.surfaceVariant,
@@ -114,15 +130,34 @@ class AboutUsScreen extends StatelessWidget {
                 borderRadius: BorderRadius.circular(12),
                 side: const BorderSide(color: AppTheme.cardBorder),
               ),
-              child: ListTile(
-                leading: const Icon(Icons.gavel_outlined,
-                    color: AppTheme.textSecondary),
-                title: const Text('Terms & Privacy Policy',
-                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
-                subtitle: const Text('How we handle your data and your rights',
-                    style: TextStyle(fontSize: 12)),
-                trailing: const Icon(Icons.chevron_right, size: 20),
-                onTap: () => context.push('/terms'),
+              child: Column(
+                children: [
+                  ListTile(
+                    leading: const Icon(Icons.description_outlined,
+                        color: AppTheme.textSecondary),
+                    title: const Text('Terms of Service',
+                        style: TextStyle(
+                            fontSize: 14, fontWeight: FontWeight.w600)),
+                    subtitle: const Text(
+                        'The rules every trade on Aliob is held to',
+                        style: TextStyle(fontSize: 12)),
+                    trailing: const Icon(Icons.chevron_right, size: 20),
+                    onTap: () => context.push('/terms-of-service'),
+                  ),
+                  const Divider(height: 1),
+                  ListTile(
+                    leading: const Icon(Icons.gavel_outlined,
+                        color: AppTheme.textSecondary),
+                    title: const Text('Terms & Privacy Policy',
+                        style: TextStyle(
+                            fontSize: 14, fontWeight: FontWeight.w600)),
+                    subtitle: const Text(
+                        'How we handle your data and your rights',
+                        style: TextStyle(fontSize: 12)),
+                    trailing: const Icon(Icons.chevron_right, size: 20),
+                    onTap: () => context.push('/terms'),
+                  ),
+                ],
               ),
             ),
             const SizedBox(height: 16),

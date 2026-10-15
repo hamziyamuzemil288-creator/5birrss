@@ -531,26 +531,142 @@ class _AdminAppealsScreenState extends State<AdminAppealsScreen> {
                       fontWeight: FontWeight.w600,
                       color: AppTheme.textPrimary),
                 ),
-              Text(
-                (c['description'] as String?) ?? '',
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                    color: AppTheme.textSecondary, fontSize: 13),
-              ),
+              _appealDescription(c),
+
               const SizedBox(height: 6),
-              Text(
-                createdAt != null
-                    ? DateFormat('d MMM yyyy, HH:mm').format(createdAt)
-                    : '',
-                style: const TextStyle(
-                    fontSize: 11, color: AppTheme.textSecondary),
-              ),
+              _appealContextRow(c, createdAt),
+
             ],
           ),
         ),
       ),
     );
+  }
+
+  /// The description rendered for the queue row, with the in-app filing tag
+  /// surfaced as its own readable chip when the case was filed from a screen
+  /// about a specific transaction.
+  Widget _appealDescription(Map<String, dynamic> c) {
+    final desc = c['description'] as String? ?? '';
+    final parsed = _parseAppealContext(desc);
+    if (parsed == null) {
+      return Text(
+        desc,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(color: AppTheme.textSecondary, fontSize: 13),
+      );
+    }
+    final core = parsed['core'] as String;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          core,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(color: AppTheme.textSecondary, fontSize: 13),
+        ),
+        const SizedBox(height: 4),
+        Container(
+          padding:
+              const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+          decoration: BoxDecoration(
+            color: AppTheme.primaryGreenDark.withValues(alpha: 0.08),
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(
+                color: AppTheme.primaryGreenDark.withValues(alpha: 0.35)),
+          ),
+          child: Text(
+            parsed['tag'] as String,
+            style: const TextStyle(
+                fontSize: 11, fontWeight: FontWeight.w700,
+                color: AppTheme.primaryGreenDark),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// One line under the description: the filing context (source label + order
+  /// reference) when the case was handed over from an in-app door.
+  Widget _appealContextRow(Map<String, dynamic> c, DateTime? createdAt) {
+    final desc = c['description'] as String? ?? '';
+    final parsed = _parseAppealContext(desc);
+    if (parsed == null) return _timeRow(createdAt);
+    final sourceLabel = parsed['source'] as String;
+    final orderRef = parsed['order'];
+    final parts = <String>[sourceLabel];
+    if (orderRef != null && orderRef.isNotEmpty) parts.add(orderRef);
+    return Text(
+      parts.join(' · '),
+      style: const TextStyle(fontSize: 11, color: AppTheme.textSecondary),
+    );
+  }
+
+  Widget _timeRow(DateTime? createdAt) {
+    return Text(
+      createdAt != null
+          ? DateFormat('d MMM yyyy, HH:mm').format(createdAt)
+          : '',
+      style: const TextStyle(fontSize: 11, color: AppTheme.textSecondary),
+    );
+  }
+
+  /// Parses the filing tag written into `description` by the appeal form when
+  /// it was handed over from an in-app door with `?about=...&order=...`.
+  ///
+  /// The form prefixes the description with one of:
+  ///   [Filed from the app — <aboutLabel> — order <orderRef>] <user text>
+  ///   [Filed from the app — <aboutLabel>] <user text>
+  ///   [Appeal via Help Chat — tagged: <aboutLabel>] <user text>
+  ///
+  /// Returns null for cases filed from the bare appeal screen.
+  ///
+  /// Order-reference matching is deliberately loose: the dispute door labels the
+  /// order with the human-readable number the buyer already sees
+  /// (`Order Vh00001`), or `Transaction <uuid>` as a fallback, so the reviewer
+  /// reads which transaction the dispute is about on the very first row.
+  ///
+  /// The order string itself is public: it is the same human-readable label the
+  /// order screen shows the buyer and that `orderLabel()`/`formatOrderNumber()`
+  /// produce from the order row's `order_number` — never the raw uuid alone.
+  static Map<String, String>? _parseAppealContext(String desc) {
+    if (desc.isEmpty) return null;
+    final orderMatch = RegExp(
+        r"^\[Filed from the app — ([^\]]+?) — order (.+?)\] ")
+        .firstMatch(desc);
+    if (orderMatch != null) {
+      return {
+        'source': 'Filed from the app',
+        'tag': 'Filed from the app — ${orderMatch.group(1)} — Order ${orderMatch.group(2)}',
+        'about': orderMatch.group(1) ?? 'Something else',
+        'order': 'Order ${orderMatch.group(2)}',
+        'core': desc.substring(orderMatch.end),
+      };
+    }
+    final labelMatch = RegExp(
+        r"^\[Filed from the app — ([^\]]+)\] ")
+        .firstMatch(desc);
+    if (labelMatch != null) {
+      return {
+        'source': 'Filed from the app',
+        'tag': 'Filed from the app — ${labelMatch.group(1)}',
+        'about': labelMatch.group(1) ?? 'Something else',
+        'core': desc.substring(labelMatch.end),
+      };
+    }
+    final chatMatch = RegExp(r"^\[Appeal via Help Chat — tagged: ([^\]]+)\] ")
+        .firstMatch(desc);
+    if (chatMatch != null) {
+      return {
+        'source': 'Help Chat',
+        'tag': 'Appeal via Help Chat — ${chatMatch.group(1)}',
+        'about': chatMatch.group(1) ?? 'Something else',
+        'core': desc.substring(chatMatch.end),
+      };
+    }
+    return null;
   }
 
   void _openDetail(Map<String, dynamic> c) {
@@ -657,6 +773,64 @@ class _AppealDetailSheetState extends State<_AppealDetailSheet> {
     }
   }
 
+  /// The filing-context header shown above the case sheet photo when the case
+  /// was handed over from an in-app door about a specific transaction.
+  ///
+  /// The queue row already trims the tag off the description; on the sheet the
+  /// reviewer is deciding, so the source, what it is about and WHICH order it is
+  /// about are shown as chips rather than buried in the paragraph.
+  Widget _appealContextHeader(Map<String, dynamic> c) {
+    final desc = c['description'] as String? ?? '';
+    final parsed = _AdminAppealsScreenState._parseAppealContext(desc);
+    if (parsed == null) return const SizedBox.shrink();
+    final sourceLabel = parsed['source'] as String;
+    final orderRef = parsed['order'];
+    final about = parsed['about'] as String;
+    final parts = <Widget>[Text(sourceLabel)];
+    if (orderRef != null && orderRef.isNotEmpty) {
+      parts.add(
+        Container(
+          margin: const EdgeInsets.only(left: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+          decoration: BoxDecoration(
+            color: AppTheme.primaryGreenDark.withValues(alpha: 0.08),
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(
+                color: AppTheme.primaryGreenDark.withValues(alpha: 0.35)),
+          ),
+          child: Text(
+            about,
+            style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                color: AppTheme.primaryGreenDark),
+          ),
+        ),
+      );
+      parts.add(
+        Container(
+          margin: const EdgeInsets.only(left: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+          decoration: BoxDecoration(
+            color: AppTheme.primaryGreen.withValues(alpha: 0.1),
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: Text(
+            orderRef,
+            style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                color: AppTheme.primaryGreen),
+          ),
+        ),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(children: parts),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final c = widget.caseData;
@@ -728,16 +902,19 @@ class _AppealDetailSheetState extends State<_AppealDetailSheet> {
               Text(DateFormat('d MMM yyyy, HH:mm').format(createdAt),
                   style: const TextStyle(
                       fontSize: 12, color: AppTheme.textSecondary)),
-            ],
-            if (respondentName != null) ...[
-              const SizedBox(height: 4),
-              Text('Reported: $respondentName',
-                  style: const TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: AppTheme.textPrimary)),
-            ],
-            const SizedBox(height: 16),
+            ],              if (respondentName != null) ...[
+                const SizedBox(height: 4),
+                Text('Reported: $respondentName',
+                    style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: AppTheme.textPrimary)),
+              ],
+              const SizedBox(height: 16),            // Filing context: when the case was handed over from an in-app
+            // door about a specific transaction, the form writes the order
+            // reference into the description, so the reviewer reads it before
+            // the report text.
+            _appealContextHeader(widget.caseData),
 
             // Evidence photo (private bucket → signed URL)
             ClipRRect(
@@ -797,15 +974,14 @@ class _AppealDetailSheetState extends State<_AppealDetailSheet> {
               _contactRow(Icons.email_outlined, c['email'] as String),
             _contactRow(Icons.badge_outlined,
                 (reporter?['phone'] as String?) ?? '—',
-                label: 'Account phone'),
-
-            const SizedBox(height: 16),
+                label: 'Account phone'),            const SizedBox(height: 16),
 
             // The other party's reply — what makes an appeal two-directional.
-            if (((c['response_text'] as String?) ?? '').isNotEmpty) ...[
-              const Text('Respondent reply',
-                  style: TextStyle(fontWeight: FontWeight.w700)),
-              const SizedBox(height: 6),
+            if (((c['response_text'] as String?) ?? '').isNotEmpty) ...
+              [
+                const Text('Respondent reply',
+                    style: TextStyle(fontWeight: FontWeight.w700)),
+                const SizedBox(height: 6),
               Container(
                 width: double.infinity,
                 padding: const EdgeInsets.all(10),

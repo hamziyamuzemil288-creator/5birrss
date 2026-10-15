@@ -10,6 +10,7 @@ import '../features/auth/role_selection_screen.dart';
 import '../features/auth/admin_login_screen.dart';
 import '../features/auth/staff_login_screen.dart';
 import '../features/staff/staff_dashboard_screen.dart';
+import '../features/auth/terms_of_service_screen.dart';
 import '../features/auth/terms_policy_screen.dart';
 import '../features/auth/update_password_screen.dart';
 import '../features/user/user_dashboard.dart';
@@ -23,6 +24,7 @@ import '../features/user/user_category_screen.dart';
 import '../features/user/user_favorites_screen.dart';
 import '../features/user/user_cart_screen.dart';
 import '../features/user/user_checkout_screen.dart';
+import '../features/user/user_payment_screen.dart';
 import '../features/user/user_availability_screen.dart';
 import '../features/user/user_order_detail_screen.dart';
 import '../features/user/provider_order_waiting_screen.dart';
@@ -347,8 +349,19 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: '/update-password',
         builder: (_, __) => const UpdatePasswordScreen(),
-      ),      GoRoute(path: '/terms',
+      ),
+      GoRoute(
+        path: '/terms',
         builder: (_, s) => TermsPolicyScreen(returnToSignup: s.extra == true),
+      ),
+      // The operative agreement on its own, reachable from the About screen and
+      // the profile menu exactly as the policy is. The combined Terms & Privacy
+      // Policy above is what the registration checkbox accepts; this page is
+      // the Terms half, and mirrors docs/terms-of-service.html (the URL Play
+      // Console can open next to the privacy policy).
+      GoRoute(
+        path: '/terms-of-service',
+        builder: (_, __) => const TermsOfServiceScreen(),
       ),
       // What Aliob is, and how to reach a human. The profile's "About Aliob"
       // row pushed /terms before this screen existed -- legal copy where a
@@ -384,6 +397,15 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       GoRoute(path: '/user/favorites', builder: (_, __) => const UserFavoritesScreen()),
       GoRoute(path: '/user/cart', builder: (_, __) => const UserCartScreen()),
       GoRoute(path: '/user/checkout', builder: (_, s) => UserCheckoutScreen(providerId: s.extra as String)),
+      // The payment step, reached from checkout once the fulfillment choice is
+      // settled: the platform's account, what the buyer wrote down, the proof
+      // of payment and the place-order call. The draft arrives as `extra`; a
+      // deep link has none, and the screen says so and sends the buyer to
+      // their cart rather than rendering a payment form for nothing.
+      GoRoute(
+        path: '/user/payment',
+        builder: (_, s) => UserPaymentScreen(draft: s.extra as OrderDraft?),
+      ),
       // The availability gate every checkout entry funnels through: Buy/Book,
       // the product page's buy-now and the cart's CHECKOUT push this route,
       // and user_checkout_screen pushReplaces itself with it as the deep-link

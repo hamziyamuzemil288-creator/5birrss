@@ -107,10 +107,14 @@ def main() -> int:
             "      FROM public.find_nearby_drivers_disabled(")},
         told_check)
 
-    # D. a claimed ride stops reaching the rider.
+    # D. a claimed ride stops reaching the rider. Patched through
+    #    authoritative_patch for the same reason as B: 20261006000005 restates
+    #    claim_ride, so mutating the 0114 copy changed nothing the check reads
+    #    -- the check reads the LAST definition, and this case went green while
+    #    proving nothing until the patch was pointed at the winning file.
     ok &= expect_red(
         "D: claim_ride no longer tells the rider",
-        {TOLD: told.replace("    'RIDE_CLAIMED',", "    'RIDE_REQUEST',")},
+        sc.authoritative_patch("claim_ride", "'RIDE_CLAIMED',", "'RIDE_REQUEST',"),
         told_check)
 
     # E. a type is spelled correctly in the enum but misspelled at the call

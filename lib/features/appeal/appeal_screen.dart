@@ -45,6 +45,17 @@ class _AppealScreenState extends ConsumerState<AppealScreen> {
   String _about = 'general';
   bool _fromChat = false;
 
+  /// The transaction a door handed over (?order=...), when the case is about
+  /// one specific order.
+  ///
+  /// `appeal_cases` has no column for it, and inventing one would put the
+  /// reference where no reviewer reads: the description is what the admin
+  /// queue renders on every row and in the case sheet. So it is written into
+  /// the description, exactly the way the chat doors already tag theirs — an
+  /// admin opening "Buyer–seller dispute" reads which order it is about
+  /// without asking anyone.
+  String? _orderRef;
+
   // Respondent picker: WHO the report is about (optional). Filled from the
   // counterparties the submitter actually met — sellers from their orders,
   // drivers from their rides — resolved server-side by appeal_counterparties()
@@ -120,6 +131,12 @@ class _AppealScreenState extends ConsumerState<AppealScreen> {
       _about = about;
     }
     _fromChat = qp['source'] == 'chat';
+    // The transaction a door was looking at, when it had one. Capped so a
+    // hand-edited URL cannot push a wall of text into the case sheet.
+    final order = qp['order']?.trim();
+    if (order != null && order.isNotEmpty) {
+      _orderRef = order.length > 64 ? order.substring(0, 64) : order;
+    }
   }
 
   Future<void> _loadCaptchaRequirement() async {
@@ -204,11 +221,27 @@ class _AppealScreenState extends ConsumerState<AppealScreen> {
       // description so the case lands with the right review context —
       // appeal_cases has no dedicated tag column, so we prefix the text that
       // admins/staff already read on every case.
+      //
+      // The in-app doors carry theirs the same way. A dispute filed from the
+      // payment step or an order screen used to arrive as an untagged
+      // paragraph: the choice the person made (`?about=dispute`) and the
+      // transaction they were looking at were both dropped, so the reviewer
+      // had to ask which order it was. The tag is the label the person chose
+      // and the reference is the one the order screen shows them.
       final aboutLabel = _aboutLabels[_about] ?? 'Something else';
-      final descriptionText = _fromChat
-          ? '[Appeal via Help Chat — tagged: $aboutLabel] '
-              '${_descriptionCtrl.text.trim()}'
-          : _descriptionCtrl.text.trim();
+      final String contextPrefix;
+      if (_fromChat) {
+        contextPrefix = '[Appeal via Help Chat — tagged: $aboutLabel] ';
+      } else if (_orderRef != null) {
+        contextPrefix = '[Filed from the app — $aboutLabel — '
+            'order ${_orderRef!}] ';
+      } else if (_about != 'general') {
+        contextPrefix = '[Filed from the app — $aboutLabel] ';
+      } else {
+        contextPrefix = '';
+      }
+      final descriptionText =
+          '$contextPrefix${_descriptionCtrl.text.trim()}';
 
       // 1. Upload the evidence photo (private bucket, same one signup uses).
       final path =

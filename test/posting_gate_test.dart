@@ -1,16 +1,20 @@
 // The posting gate, tested where it decides.
 //
-// The gate is the three-step checklist a provider meets before posting:
-// document verification, the admin-configured wallet minimum, and — since
-// item 6 — an active payment account (no account, no listing, and the
-// existing ones are hidden from buyers). What breaks
-// silently in a gate like this is the DISPLAY logic — a step that reads
-// "Done" when the server did not say so, an "under review" state that
-// swallows the other step, a progress line that counts the wrong things, or
-// a new server code (WALLET_BELOW_MINIMUM, migration 20261006000003) that
-// falls through to a generic sentence instead of the wallet step's remedy.
-// Every test below is one of those shapes, driven through the real pure
-// factory (`PostingGateState.from`) rather than a copy of it.
+// The gate is the checklist a provider meets before posting: document
+// verification and the admin-configured wallet minimum. It was THREE steps
+// while item 6 was in force — an active payment account, without which the
+// server refused the listing and hid the ones already published — but
+// 20261015000010 removed that rule: the platform collects the payment, so a
+// provider has no account number to publish and nothing to add. The gate must
+// not keep a third row that no screen in the app can turn green.
+//
+// What breaks silently in a gate like this is the DISPLAY logic — a step that
+// reads "Done" when the server did not say so, an "under review" state that
+// swallows the other step, a progress line that counts the wrong things, or a
+// new server code (WALLET_BELOW_MINIMUM, migration 20261006000003) that falls
+// through to a generic sentence instead of the wallet step's remedy. Every test
+// below is one of those shapes, driven through the real pure factory
+// (`PostingGateState.from`) rather than a copy of it.
 
 import 'package:birr5/core/services/posting_gate.dart';
 import 'package:birr5/core/services/provider_doc_gate.dart';
@@ -26,7 +30,6 @@ PostingGateState _state({
   double requiredAmount = 0,
   bool verificationRequired = true,
   String? rejectionReason,
-  bool? hasPaymentAccount,
 }) =>
     PostingGateState.from(
       checked: checked,
@@ -36,7 +39,6 @@ PostingGateState _state({
       requiredAmount: requiredAmount,
       verificationRequired: verificationRequired,
       rejectionReason: rejectionReason,
-      hasPaymentAccount: hasPaymentAccount,
     );
 
 void main() {
@@ -45,28 +47,23 @@ void main() {
       expect(_state().ready, isTrue);
     });
 
-    // Item 6: the account step is a direct read of the table the server
-    // refuses without. A definite "no" blocks; an unreadable step never
-    // pretends to be done but does not block either (the create path still
-    // enforces the rule).
-    test('no payment account is a blocking todo step', () {
-      final s = _state(hasPaymentAccount: false);
-      expect(s.paymentAccount.state, PostingStepState.todo);
-      expect(s.paymentAccount.route, '/provider/payment-methods');
-      expect(s.ready, isFalse);
-    });
-
-    test('an active payment account reads as done', () {
-      final s = _state(hasPaymentAccount: true);
-      expect(s.paymentAccount.state, PostingStepState.done);
-      expect(s.ready, isTrue);
-      expect(s.progressLabel, '3 of 3 done');
-    });
-
-    test('an unreadable account step is unknown and never blocks', () {
-      final s = _state(); // hasPaymentAccount not passed => null
-      expect(s.paymentAccount.state, PostingStepState.unknown);
-      expect(s.ready, isTrue);
+    // 20261015000010: the account rule is gone, so the gate must not carry a
+    // step for it. The two assertions are the pair that matters — no route to
+    // the accounts screen, and no third step counted — because either one
+    // alone would leave a provider staring at a row they can never complete.
+    test('there is no payment-account step any more', () {
+      final s = _state();
+      expect(PostingGateState.totalSteps, 2);
+      expect(s.progressLabel, '2 of 2 done');
+      // The wallet step is the only one that can be outstanding on its own —
+      // the third, account-shaped state no longer exists to be reported.
+      expect(s.onlyWalletLeft, isFalse);
+      expect(_state(blockers: const ['WALLET_BELOW_MINIMUM'], balance: 0)
+          .onlyWalletLeft, isTrue);
+      // And nothing in the state points at the accounts screen.
+      expect(s.wallet.route ?? '', isNot('/provider/payment-methods'));
+      expect(PostingGateState.unknown.wallet.route ?? '',
+          isNot('/provider/payment-methods'));
     });
 
     // A provider whose blockers could not be read must never see a green
@@ -83,7 +80,7 @@ void main() {
       expect(s.ready, isFalse);
       expect(s.documents.state, PostingStepState.unknown);
       expect(s.wallet.state, PostingStepState.unknown);
-      expect(s.progressLabel, '0 of 3 done');
+      expect(s.progressLabel, '0 of 2 done');
     });
 
     test('any blocker means not ready', () {
@@ -92,26 +89,23 @@ void main() {
   });
 
   group('progress counts what the server counts', () {
-    test('one step done reads "1 of 3 done"', () {
-      // Documents under review (not done), wallet short (not done), the
-      // payment account present (done): exactly one counted step.
+    test('one step done reads "1 of 2 done"', () {
+      // Documents verified (done), the wallet short (not done): exactly one
+      // counted step, and the gate is not ready.
       final s = _state(
-        blockers: const ['DOCUMENTS_UNVERIFIED', 'WALLET_BELOW_MINIMUM'],
-        docState: DocReviewState.pending,
+        blockers: const ['WALLET_BELOW_MINIMUM'],
         balance: 40,
         requiredAmount: 100,
-        hasPaymentAccount: true,
       );
       expect(s.doneCount, 1);
-      expect(s.progressLabel, '1 of 3 done');
+      expect(s.progressLabel, '1 of 2 done');
       expect(s.ready, isFalse);
     });
 
-    test('two steps done read "2 of 3 done" and are ready', () {
-      // The account step was not read (null): unknown, not counted, not
-      // blocking — the third row shows "We could not check", never "Done".
+    test('both steps done read "2 of 2 done" and are ready', () {
       final s = _state(balance: 500, requiredAmount: 100);
-      expect(s.progressLabel, '2 of 3 done');
+      expect(s.doneCount, 2);
+      expect(s.progressLabel, '2 of 2 done');
       expect(s.ready, isTrue);
     });
 
@@ -129,7 +123,7 @@ void main() {
       expect(s.documents.actionLabel, isNull);
       expect(s.wallet.state, PostingStepState.todo);
       expect(s.wallet.route, '/wallet/recharge');
-      expect(s.progressLabel, '0 of 3 done');
+      expect(s.progressLabel, '0 of 2 done');
     });
   });
 
@@ -158,8 +152,6 @@ void main() {
 
     test('WALLET_BELOW_MINIMUM folds into the wallet step, not extra blockers',
         () {
-      // The new server code must not render as a third, unexplained row —
-      // the remedy is the same recharge, so it belongs to the wallet step.
       final s = _state(
         blockers: const ['DOCUMENTS_UNVERIFIED', 'WALLET_BELOW_MINIMUM'],
         docState: DocReviewState.none,
@@ -177,6 +169,14 @@ void main() {
       );
       expect(s.extraBlockers,
           containsAll(['ACCOUNT_NOT_APPROVED', 'ACTIVATION_FEE_UNPAID']));
+    });
+
+    // The server no longer raises this code, so nothing in the app may still
+    // tell a provider to go and add an account number (Part 13).
+    test('the readiness banner has no payment-account remedy', () {
+      final remedy = ProviderReadiness.remedyFor('NO_PAYMENT_ACCOUNT');
+      expect(remedy.route, isNot('/provider/payment-methods'));
+      expect(remedy.action, isNot('Add a payment account'));
     });
   });
 

@@ -355,6 +355,14 @@ class UserProfileScreen extends ConsumerWidget {
                   _menuTile(Icons.info_outline, 'About Aliob',
                       AppTheme.textSecondary,
                       onTap: () => context.push('/about')),
+                  _divider(),
+                  // The Terms of Service, on their own page. The Terms used to
+                  // be reachable only as half of the combined policy document
+                  // the registration checkbox accepts, so a user looking for
+                  // "the rules" found a data-handling document instead.
+                  _menuTile(Icons.description_outlined, 'Terms of Service',
+                      AppTheme.textSecondary,
+                      onTap: () => context.push('/terms-of-service')),
                 ],
               ),
             ),

@@ -1048,6 +1048,16 @@ class _UserOrderDetailScreenState
                         // hard-coded into this screen.
                         if (!_isProvider) ...[
                           const PlatformContactCard(),
+                          const SizedBox(height: 12),
+                          // The other half of "something happened": a case, not
+                          // a phone number. It files into `appeal_cases`, which
+                          // is what the admin dashboard's Appeals badge counts
+                          // and /admin/appeals lists, and it arrives pre-tagged
+                          // as a dispute about this order so a reviewer has the
+                          // context without asking for it. The same door stands
+                          // on the payment screen, where the money problem
+                          // actually happens.
+                          _appealCard(),
                           const SizedBox(height: 16),
                         ],
                         _itemsCard(),
@@ -1411,6 +1421,47 @@ class _UserOrderDetailScreenState
               ),
             ),
           ],
+        ],
+      ),
+    );
+  }
+
+  /// Files an appeal: the fast path from "this transaction went wrong" to the
+  /// admin queue that acts on it, without an email address or a form to find.
+  /// The case lands in `appeal_cases` pre-tagged as a dispute, which is what
+  /// the admin dashboard's Appeals badge counts and /admin/appeals lists.
+  ///
+  /// The order goes with it. The reviewer reads the case's description, so the
+  /// reference the buyer already knows (`Order Vh00001`) is what makes the case
+  /// actionable on sight instead of a follow-up question.
+  Widget _appealCard() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: AppTheme.error.withOpacity(0.05),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppTheme.error.withOpacity(0.25)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.gavel_outlined, size: 20, color: AppTheme.error),
+          const SizedBox(width: 12),
+          const Expanded(
+            child: Text(
+              'Something wrong with this order?',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+            ),
+          ),
+          TextButton(
+            onPressed: () {
+              final label = orderLabel(_order ?? const {});
+              final encoded = Uri.encodeComponent(label);
+              context.push('/appeal?about=dispute&order=$encoded');
+            },
+            child: const Text('REPORT IT',
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+          ),
         ],
       ),
     );
