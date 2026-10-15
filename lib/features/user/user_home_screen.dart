@@ -75,6 +75,15 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
   /// Who carries the verified badge beside their name on the rail.
   Set<String> _verifiedProviders = const {};
 
+  /// The top categories of the last 7 days, from `ranked_categories`. Rendered
+  /// as the chip rail under the three big cards: the ordering is completed
+  /// work this week (20261015000011), so it is the same "what is happening
+  /// now" answer the Trending provider rail gives, one level down.
+  ///
+  /// Empty means no rail at all rather than an empty strip: a failed ranking
+  /// is not a fact about the marketplace.
+  List<Map<String, dynamic>> _rankedCategories = const [];
+
   /// Approved providers, for the gallery section. Read from
   /// `public_provider_profiles`, which already filters to `APPROVED` and is
   /// granted to anon + authenticated, so this needs no RLS change and no
@@ -163,6 +172,8 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
             Map<String, String>.from(data['providerImages'] as Map);
         _verifiedProviders =
             Set<String>.from(data['verified'] as Set);
+        _rankedCategories =
+            List<Map<String, dynamic>>.from(data['ranked'] as List);
         _loading = false;
         _error = null;
         // Who liked what. A grid of cards must cost one query, not one per
@@ -204,31 +215,42 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
           .order('sort_order')
           .limit(40);
       categories = (catData as List).map((j) => AppCategory.fromJson(j)).toList();
-      // Rank the rail by how much trade actually happens under each category,
-      // from the most to the least, so the busiest trade leads instead of
-      // whichever row an administrator happened to type first. Non-fatal: a
-      // failed ranking leaves the sort_order the query already returned, which
-      // is the order this screen shipped with.
-      try {
-        final ranked = await client.rpc('ranked_categories', params: {
-          'p_limit': 100,
-          'p_offset': 0,
-        });
-        final order = <String, int>{};
-        var i = 0;
-        for (final row in List<Map<String, dynamic>>.from(ranked as List)) {
-          final id = row['category_id'];
-          if (id is String) order[id] = i++;
-        }
-        if (order.isNotEmpty) {
-          categories.sort((a, b) =>
-              (order[a.id] ?? 1 << 30).compareTo(order[b.id] ?? 1 << 30));
-        }
-      } catch (_) {
-        // Keep the sort_order the categories query already gave us.
-      }
       _cachedCategories = categories;
       _categoriesFetchedAt = DateTime.now();
+    }
+
+    // 1b. The weekly ranking, read on EVERY load rather than only on a cache
+    //     miss, because it now drives a rail of its own below. Caching the
+    //     category list and forgetting to re-read the rank is exactly how a
+    //     "this week" rail goes permanently empty for the rest of the session.
+    //    
+    //     The ordering is completed work in the LAST 7 DAYS (migration
+    //     20261015000011), so a category that came alive this week is visible
+    //     here and one whose week is over drops off — the same window the
+    //     Trending provider rail ranks by. Non-fatal: a failed ranking leaves
+    //     the categories in the sort_order the query gave them, and hides the
+    //     rail rather than rendering it empty.
+    List<Map<String, dynamic>> ranked = const [];
+    try {
+      final rows = await client.rpc('ranked_categories', params: {
+        'p_limit': 100,
+        'p_offset': 0,
+      });
+      ranked = List<Map<String, dynamic>>.from(rows as List);
+      final order = <String, int>{};
+      var i = 0;
+      for (final row in ranked) {
+        final id = row['category_id'];
+        if (id is String) order[id] = i++;
+      }
+      if (order.isNotEmpty) {
+        categories.sort((a, b) =>
+            (order[a.id] ?? 1 << 30).compareTo(order[b.id] ?? 1 << 30));
+      }
+      // The cache holds the RANKED order now, so a later cache hit keeps it.
+      _cachedCategories = categories;
+    } catch (_) {
+      // Keep the sort_order the categories query already gave us.
     }
 
     // 2. The ranked product rail. Scoped to the browse city — EXCEPT when the
@@ -309,6 +331,9 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
       'providers': providers,
       'providerImages': imageMaps,
       'verified': verified,
+      // The weekly ranking, capped to the rail. The full list already sorted
+      // the categories above; this is the same answer, sliced for the chips.
+      'ranked': ranked.take(12).toList(),
       'gallery': gallery,
       'galleryPrices': galleryPrices,
     };
@@ -624,6 +649,7 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
                   message: _error!, onRetry: _load),
             ),
           SliverToBoxAdapter(child: _categorySection()),
+          SliverToBoxAdapter(child: _rankedCategoryRail()),
           SliverToBoxAdapter(child: _gallerySection()),
           if (_activeRide != null)
             SliverToBoxAdapter(child: _rideBanner(_activeRide!)),
@@ -1151,6 +1177,120 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
         const SizedBox(height: 8),
       ],
     );
+  }
+
+  // ------------------------------------------------- top categories, this week
+
+  /// The chip rail under the three big cards: the categories the last 7 days
+  /// actually traded in, most first.
+  ///
+  /// This is where the ranking's window becomes visible. `ranked_categories`
+  /// used to order by career totals, which is an ordering that never changes —
+  /// so "the top categories" was really "the categories that existed longest".
+  /// Since 20261015000011 the first key is completed work in the last 7 days,
+  /// the same window the Trending provider rail ranks by, and this rail is the
+  /// surface that shows it: a category with a busy week moves up, and one with
+  /// nothing this week drops off even though its lifetime total is larger.
+  ///
+  /// Every chip is NAVIGATION, not decoration: it opens the category's own
+  /// screen (/user/category/:id), which lists that category's providers and
+  /// sub-categories. An empty ranking renders no rail at all — a failed read
+  /// is not a fact about the marketplace, and a strip of nothing says it is.
+  Widget _rankedCategoryRail() {
+    final rows = _rankedCategories;
+    if (rows.isEmpty) return const SizedBox.shrink();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Padding(
+          padding: EdgeInsets.fromLTRB(20, 18, 20, 2),
+          child: Text(
+            'Top categories this week',
+            style: TextStyle(
+              fontSize: 16.5,
+              fontWeight: FontWeight.w700,
+              color: AppTheme.textPrimary,
+            ),
+          ),
+        ),
+        const Padding(
+          padding: EdgeInsets.fromLTRB(20, 0, 20, 10),
+          child: Text(
+            'Ranked by completed work in the last 7 days',
+            style: TextStyle(fontSize: 11.5, color: AppTheme.textMuted),
+          ),
+        ),
+        SizedBox(
+          height: 40,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            itemCount: rows.length,
+            separatorBuilder: (_, __) => const SizedBox(width: 8),
+            itemBuilder: (_, i) => _rankedCategoryChip(rows[i]),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _rankedCategoryChip(Map<String, dynamic> row) {
+    final id = ((row['category_id'] as String?) ?? '').trim();
+    final name = ((row['name'] as String?) ?? '').trim();
+    if (id.isEmpty || name.isEmpty) return const SizedBox.shrink();
+    return GestureDetector(
+      onTap: id.isEmpty ? null : () => context.push('/user/category/$id'),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14),
+        decoration: BoxDecoration(
+          color: AppTheme.primaryGreen.withOpacity(0.08),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: AppTheme.primaryGreen.withOpacity(0.22)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              _rankedCategoryIcon((row['marketplace_sector'] as String?) ?? ''),
+              size: 15,
+              color: AppTheme.primaryGreen,
+            ),
+            const SizedBox(width: 6),
+            Flexible(
+              child: Text(
+                name,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: AppTheme.textPrimary,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// One icon per marketplace sector. Falls back to the generic category glyph
+  /// rather than guessing from the name: a wrong icon reads as a different
+  /// trade, and no icon reads as "no opinion".
+  IconData _rankedCategoryIcon(String sector) {
+    switch (sector) {
+      case 'FOOD':
+        return Icons.restaurant_outlined;
+      case 'RETAIL':
+        return Icons.storefront_outlined;
+      case 'ACCOMMODATION':
+        return Icons.hotel_outlined;
+      case 'SERVICES':
+        return Icons.design_services_outlined;
+      case 'TRANSPORT':
+        return Icons.directions_car_outlined;
+      default:
+        return Icons.category_outlined;
+    }
   }
 
   /// Groups of categories mapped into the 3 big sections.

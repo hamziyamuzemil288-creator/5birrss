@@ -10039,7 +10039,189 @@ CHECKS = [
      "the buyer writes and the proof upload, and a problem reaches the admin "
      "appeals queue from the transaction itself",
      check_payment_step_and_appeal_are_wired),
+    ("the category rail ranks this week, an admin can add a category under a "
+     "mother category, and the seeded test category is kept",
+    # A lambda, and only because this check is defined below the registry it
+    # is listed in. The name is resolved when the check RUNS, not when the list
+    # is built, so the definition can sit with its siblings at the end of the
+    # file where the newest check has always gone.
+     lambda: check_category_tree_and_weekly_rank_are_wired()),
 ]
+
+
+def check_category_tree_and_weekly_rank_are_wired() -> list[str]:
+    """The category rail is about NOW, and an administrator can grow the tree.
+
+    Two halves that only make sense together, because the ranking is the thing
+    a new category is entering:
+
+      1. `ranked_categories` leads with completed work in the LAST 7 DAYS,
+         the same window `ranked_providers` ranks by since 20261011000001. A
+         revert to career totals still returns rows and still looks ranked — it
+         just never changes, which is how "the top categories" silently became
+         "the categories that existed longest".
+      2. `admin_create_category` exists, is admin-gated BEFORE it validates,
+         refuses a mother category that is not top level, and hands the new
+         row its mother's classification. The third one is not cosmetic:
+         `categories.sector` and `marketplace_sector` are CHECK-constrained, so
+         a row written without them does not insert at all.
+      3. The door: the screen calls the RPC, the router registers the route and
+         the dashboard pushes it. A server half with no door is how the
+         per-category fee rates existed in the schema for months with no editor.
+      4. The test category is seeded by the migration and is not deleted by a
+         later one — it is KEPT, so the tree has something to look at.
+    """
+    problems: list[str] = []
+
+    mig = MIGRATIONS / \
+        "20261015000011_the_category_rank_is_this_week_too.sql"
+    if not mig.is_file():
+        return ["20261015000011...sql is missing — the category rail ranks by "
+                "career totals (an ordering that never changes) and there is "
+                "still no way to add a category from inside the app"]
+    sql = _strip_comments(_read(mig))
+
+    # 1. The window, on the body that WINS — a later restatement is the live
+    #    definition, and judging a superseded copy is how a false green is born.
+    target, src = last_migration_defining("ranked_categories")
+    if target is None:
+        problems.append("no migration defines public.ranked_categories()")
+    else:
+        body = function_body(src, "ranked_categories")
+        for needle, why in (
+            ("v_window",
+             "ranked_categories has no weekly window — it ranks by career "
+             "totals, so the same categories lead forever"),
+            ("interval '7 days'",
+             "the category rank is no longer a week, so it disagrees with "
+             "ranked_providers about what 'this week' means"),
+            ("o.updated_at >= now() - v_window",
+             "the order half of the weekly key reads no completion time"),
+            ("r.updated_at >= now() - v_window",
+             "the ride half of the weekly key reads no completion time, so a "
+             "category whose trade is rides never rises"),
+            ("c.name ASC",
+             "ranked_categories lost its stable tiebreak — an ordering the "
+             "client cannot re-derive must keep one"),
+        ):
+            if needle not in body:
+                problems.append("%s: %s" % (target.name, why))
+
+    # 2. The write path.
+    ctarget, csrc = last_migration_defining("admin_create_category")
+    if ctarget is None:
+        problems.append("no migration defines public.admin_create_category() — "
+                        "a category can only be added by a deploy")
+    else:
+        body = function_body(csrc, "admin_create_category")
+        low = body.lower()
+        # SECURITY DEFINER sits in the header, ABOVE `AS $$`, so it is read
+        # from the definition rather than from the body the extract below
+        # returns -- a body-only search for it is a check that can never pass.
+        # Scoped to THIS function's own header: the file defines several
+        # functions, so a whole-file search would be satisfied by a neighbour.
+        header = re.search(
+            r"FUNCTION\s+public\.admin_create_category\b[\s\S]{0,400}?"
+            r"SECURITY\s+DEFINER", src, re.IGNORECASE)
+        if header is None:
+            problems.append(
+                "%s: admin_create_category is not SECURITY DEFINER, so it "
+                "writes with the caller's rights and RLS refuses it"
+                % ctarget.name)
+        for needle, why in (
+            ("insufficient_permission",
+             "admin_create_category refuses nobody — any caller who can reach "
+             "it can grow the category tree"),
+            ("v_parent.parent_id is not null",
+             "admin_create_category accepts a mother that is not top level, "
+             "so a third level can appear where no screen shows it"),
+            ("v_parent.sector",
+             "admin_create_category no longer inherits the mother's sector, "
+             "so the new row violates the column's CHECK constraint"),
+            ("v_parent.marketplace_sector",
+             "admin_create_category no longer inherits the mother's "
+             "marketplace sector, so the fee model and BUY/BOOK rules cannot "
+             "classify the new row"),
+        ):
+            if needle.lower() not in low:
+                problems.append("%s: %s" % (ctarget.name, why))
+        # The guard has to come FIRST. A function that validated before it
+        # authenticated would answer "that slug is taken" for anyone who could
+        # call it, which is a write oracle on the catalogue.
+        guard = low.find("if not public.is_admin()")
+        write = low.find("insert into public.categories")
+        if guard < 0:
+            problems.append("%s: admin_create_category has no is_admin() "
+                            "guard at all" % ctarget.name)
+        elif write >= 0 and guard > write:
+            problems.append("%s: admin_create_category writes before it "
+                            "checks who is calling" % ctarget.name)
+        if "revoke all on function public.admin_create_category" not in sql.lower():
+            problems.append("%s: admin_create_category is granted without "
+                            "first revoking PUBLIC/anon, so the EXECUTE "
+                            "privilege depends on the default" % mig.name)
+        if not re.search(
+                r"GRANT EXECUTE ON FUNCTION public\.admin_create_category\(uuid, text, text, text\)\s*\n\s*TO authenticated;",
+                sql, re.IGNORECASE):
+            problems.append("%s: admin_create_category is not granted to "
+                            "authenticated, so an admin's own call is refused "
+                            "by privilege rather than by the guard" % mig.name)
+
+    # 3. The door.
+    screen = LIB / "features" / "admin" / "admin_categories_screen.dart"
+    if not screen.is_file():
+        problems.append("lib/features/admin/admin_categories_screen.dart is "
+                        "missing — the RPC exists with no way to call it")
+    else:
+        code = _dart_without_comments(_read(screen))
+        for needle, why in (
+            ("'admin_create_category'",
+             "the screen no longer calls the RPC"),
+            ("'p_parent_id'",
+             "the screen no longer sends the mother category"),
+            ("c['parent_id'] == null",
+             "the mother picker no longer offers only top-level categories, so "
+             "the form offers choices the server refuses"),
+        ):
+            if needle not in code:
+                problems.append("admin_categories_screen.dart: %s" % why)
+    router = _read(LIB / "routing" / "app_router.dart")
+    if "/admin/categories" not in router:
+        problems.append("app_router.dart does not register /admin/categories")
+    if "AdminCategoriesScreen" not in router:
+        problems.append("app_router.dart does not build AdminCategoriesScreen")
+    dash = _read(LIB / "features" / "admin" / "admin_dashboard.dart")
+    if "context.push('/admin/categories')" not in dash:
+        problems.append("admin_dashboard.dart no longer offers the Categories "
+                        "card, so the screen is unreachable from the admin's "
+                        "own dashboard")
+
+    # 4. The rail's client half, and the test category that is KEPT.
+    home = _dart_without_comments(
+        _read(LIB / "features" / "user" / "user_home_screen.dart"))
+    for needle, why in (
+        ("'ranked_categories'",
+         "the home feed no longer reads the ranking that drives its rail"),
+        ("_rankedCategories",
+         "the home feed no longer holds the ranking"),
+        ("context.push('/user/category/$id')",
+         "a top category chip is no longer navigation — it decorates the rail "
+         "without opening the category"),
+    ):
+        if needle not in home:
+            problems.append("user_home_screen.dart: %s" % why)
+    for path in migration_files():
+        src = _read(path)
+        if "test-category" in src and re.search(
+                r"DELETE\s+FROM\s+(public\.)?categories[\s\S]{0,200}test-category",
+                src, re.IGNORECASE):
+            problems.append("%s deletes the seeded test category — it is KEPT "
+                            "on purpose, so the tree has something to look at"
+                            % path.name)
+    if "'test-category'" not in sql:
+        problems.append("%s does not seed the test category" % mig.name)
+
+    return problems
 
 
 def main() -> int:

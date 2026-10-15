@@ -81,6 +81,7 @@ import '../features/admin/fee_settings_screen.dart';
 import '../features/admin/admin_content_control_screen.dart';
 import '../features/admin/widgets/image_delete_sheet.dart';
 import '../features/shared/transaction_documents_screen.dart';
+import '../features/admin/admin_categories_screen.dart';
 import '../features/admin/category_fee_settings_screen.dart';
 import '../features/appeal/appeal_screen.dart';
 import '../features/appeal/my_appeals_screen.dart';
@@ -653,6 +654,14 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       GoRoute(
           path: '/admin/fees/categories',
           builder: (_, __) => const CategoryFeeSettingsScreen()),
+
+      // The category tree itself, and the door that grows it. The sibling
+      // routes above are about what a category CHARGES and what a provider is
+      // ASKED; this one is about which categories exist. Before it, adding one
+      // meant a migration — see admin_categories_screen.dart.
+      GoRoute(
+          path: '/admin/categories',
+          builder: (_, __) => const AdminCategoriesScreen()),
 
       // What each trade's provider is asked for, and what it costs. The
       // control surface for the provider's own settings form: a hotel is

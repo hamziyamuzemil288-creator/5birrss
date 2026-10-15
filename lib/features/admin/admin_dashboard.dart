@@ -785,6 +785,11 @@ class _AdminDashboardState extends ConsumerState<AdminDashboard> {
                             _menuCard(Icons.payments_outlined, 'Fees & Pricing',
                                 'Commission, activation and ride fares',
                                 () => context.push('/admin/fees')),
+                          if (ref.read(authProvider).isAdmin ||
+                              _can('category_management'))
+                            _menuCard(Icons.category_outlined, 'Categories',
+                                'The tree, and the door that adds to it',
+                                () => context.push('/admin/categories')),
                           // The override layer above Fees & Pricing: what a
                           // bajaj pays differs from a big truck, and Addis
                           // Ababa differs from Hawassa. Without this card the
