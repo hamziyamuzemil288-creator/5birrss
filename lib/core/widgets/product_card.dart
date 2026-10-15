@@ -194,7 +194,7 @@ class ProductCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final String? img = _data.data.imageUrl;
+    final String? img = _data.imageUrl;
     // A card with no photo is the TEXT-ONLY card: name, price and the same
     // action, with no image area at all. That is what a photo-less listing
     // renders as on its own provider's page — the one surface allowed to show
