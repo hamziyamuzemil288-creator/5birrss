@@ -45,16 +45,27 @@ SET search_path = public, pg_temp;
 -- existed). Lift it for the two seeds and put it straight back.
 ALTER TABLE public.system_settings DISABLE TRIGGER trg_system_settings_security;
 
+-- The seeded defaults are JSON STRINGS ('""'::jsonb). `system_settings.value`
+-- is jsonb (0001_core_schema), so a bare '' is not valid JSON and the push
+-- died with "invalid input syntax for type json (SQLSTATE 22P02)" before any
+-- of this file applied. '""'::jsonb is what admin_update_setting() stores when
+-- an administrator saves these two keys, so the default and an edited value
+-- have the same shape.
 INSERT INTO public.system_settings(key, value)
-VALUES ('admin_contact_phone', '')
+VALUES ('admin_contact_phone', '""'::jsonb)
 ON CONFLICT (key) DO NOTHING;
 
 INSERT INTO public.system_settings(key, value)
-VALUES ('admin_payment_details', '')
+VALUES ('admin_payment_details', '""'::jsonb)
 ON CONFLICT (key) DO NOTHING;
 
 ALTER TABLE public.system_settings ENABLE TRIGGER trg_system_settings_security;
 
+-- (s.value #>> '{}') — NOT s.value. The column is jsonb and these values are
+-- stored as JSON strings, so a jsonb -> text conversion hands the client the
+-- quoted JSON form ('"+2519..."', '""') instead of the value itself, and the
+-- empty default would stop looking empty. `#>> '{}'` extracts the scalar's
+-- own text, which is what the buyer-facing card parses (`row['value']`).
 CREATE OR REPLACE FUNCTION public.public_app_settings()
 RETURNS TABLE (key text, value text)
 LANGUAGE sql
@@ -62,7 +73,7 @@ STABLE
 SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
-  SELECT s.key, s.value
+  SELECT s.key, (s.value #>> '{}')
     FROM public.system_settings s
    WHERE s.key IN ('admin_contact_phone', 'admin_payment_details');
 $$;
