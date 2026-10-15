@@ -12,6 +12,9 @@ import '../../core/widgets/primary_button.dart';
 import '../../core/services/cart_service.dart';
 import '../../core/services/fee_resolver.dart';
 import '../../core/services/document_upload_service.dart';
+import '../../core/services/location_prompt.dart';
+import '../../core/services/location_service.dart';
+import '../../core/widgets/where_to_picker.dart';
 import '../../core/utils/order_number_format.dart' as onf;
 import '../../core/utils/friendly_error.dart';
 import '../../core/utils/friendly_failure.dart';
@@ -53,6 +56,40 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
   /// cart's own line). An empty cart is not a booking.
   bool get _isBookingCart =>
       _items.isNotEmpty && _items.every((i) => i.isBooking);
+
+  // ── Part 10: the delivery option ──
+  //
+  // Choosing Delivery now asks three things in order — which vehicle, where it
+  // goes, and (implicitly) whether location is on — and prices the trip with
+  // the SAME fare function the transport section charges a ride with. Nothing
+  // here computes a fee: [_deliveryQuote] is what the server answered, and the
+  // order is priced by the server from the same reader.
+  //
+  // The vehicle types are the categories the ride form offers
+  // (`sector = 'VEHICLE'`), so "Car", "Bajaj", … mean the same thing in both
+  // flows and an admin editing one rate changes both.
+  List<Map<String, dynamic>> _vehicleCategories = const [];
+  String? _deliveryVehicleId;
+  String? _deliveryVehicleName;
+  double? _deliveryLat;
+  double? _deliveryLng;
+  String? _deliveryPlaceLabel;
+  DeliveryQuote? _deliveryQuote;
+  bool _deliveryQuoting = false;
+  bool _deliveryFlowRunning = false;
+
+  /// The delivery fee actually added to the total: zero unless the server
+  /// priced this delivery. A failed or unpriceable quote contributes NOTHING
+  /// rather than an invented number.
+  double get _deliveryFee =>
+      _fulfillmentMode == 'DELIVERY' && (_deliveryQuote?.hasValue ?? false)
+          ? _deliveryQuote!.fee!
+          : 0.0;
+
+  /// What the buyer pays: the product display prices plus the delivery fee
+  /// when there is one. Switching to Self-pickup drops the fee out of the
+  /// total immediately, because [_deliveryFee] reads [_fulfillmentMode].
+  double get _payableTotal => _total + _deliveryFee;
   File? _screenshot;
   File? _nationalId;
   final _picker = ImagePicker();
@@ -295,6 +332,263 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
 
   double get _total => _items.fold(0.0, (sum, i) => sum + i.lineTotal);
 
+  /// The vehicle types the transport section offers, from the same source:
+  /// active `VEHICLE` categories, in the admin's order.
+  Future<void> _loadVehicleCategories() async {
+    if (_vehicleCategories.isNotEmpty) return;
+    try {
+      final cats = await Supabase.instance.client
+          .from('categories')
+          .select('id,name,slug')
+          .eq('sector', 'VEHICLE')
+          .eq('is_active', true)
+          .order('sort_order');
+      if (mounted) {
+        setState(() =>
+            _vehicleCategories = List<Map<String, dynamic>>.from(cats as List));
+      }
+    } catch (_) {
+      // No categories: the buyer can still order for delivery; the fee is just
+      // not quotable yet, and the server refuses to invent one either.
+    }
+  }
+
+  /// Step 1 of the delivery option: which vehicle. Re-picking re-quotes
+  /// immediately, without leaving checkout.
+  Future<void> _chooseVehicleType() async {
+    await _loadVehicleCategories();
+    if (!mounted) return;
+    if (_vehicleCategories.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No delivery vehicle types are configured yet'),
+        ),
+      );
+      return;
+    }
+    final picked = await showModalBottomSheet<Map<String, dynamic>>(
+      context: context,
+      builder: (sheetContext) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(20, 18, 20, 6),
+              child: Text('How should it be delivered?',
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+            ),
+            for (final c in _vehicleCategories)
+              ListTile(
+                leading: const Icon(Icons.local_shipping_outlined,
+                    color: AppTheme.primaryGreen),
+                title: Text('${c['name']}'),
+                trailing: (_deliveryVehicleId == c['id'])
+                    ? const Icon(Icons.check, color: AppTheme.primaryGreen)
+                    : null,
+                onTap: () => Navigator.of(sheetContext).pop(c),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (picked == null || !mounted) return;
+    setState(() {
+      _deliveryVehicleId = picked['id'] as String?;
+      _deliveryVehicleName = picked['name'] as String?;
+      _deliveryQuote = null;
+    });
+    // A different vehicle is a different rate: re-quote with the same point.
+    await _requoteDelivery();
+  }
+
+  /// Step 2: location on, then step 3: the map. Both already exist in the app
+  /// — LocationPrompt owns the one wording for every location state, and
+  /// WhereToPicker IS the map page (search, nearby kebeles, tap to drop a pin),
+  /// so no second map or second permission flow is introduced here.
+  Future<void> _chooseDeliveryPoint() async {
+    await LocationPrompt.offerOnce(
+      context,
+      title: 'Turn on location?',
+      reason: 'We use your location to measure the delivery distance and price '
+          'it. You can also drop the pin by hand on the map.',
+    );
+    if (!mounted) return;
+
+    GeoPoint? center;
+    final fix = await LocationService.instance.getCurrentPositionDetailed();
+    if (fix.success && fix.position != null) {
+      center = GeoPoint(fix.position!.latitude, fix.position!.longitude);
+    }
+    if (!mounted) return;
+
+    final chosen = await WhereToPicker.open(
+      context,
+      title: 'Where should we deliver?',
+      initialCenter: center,
+    );
+    if (chosen == null || !mounted) return;
+    setState(() {
+      _deliveryLat = chosen.lat;
+      _deliveryLng = chosen.lng;
+      _deliveryPlaceLabel = chosen.label;
+      _deliveryQuote = null;
+    });
+    await _requoteDelivery();
+  }
+
+  /// Asks the SERVER for the fee. One reader, the same one the order is priced
+  /// with, so the breakdown below and the amount charged agree by construction.
+  Future<void> _requoteDelivery() async {
+    final lat = _deliveryLat;
+    final lng = _deliveryLng;
+    if (lat == null || lng == null) return;
+    setState(() => _deliveryQuoting = true);
+    final quote = await FeeResolver.instance.deliveryFee(
+      providerId: widget.providerId,
+      deliveryLat: lat,
+      deliveryLng: lng,
+      vehicleCategoryId: _deliveryVehicleId,
+    );
+    if (!mounted) return;
+    setState(() {
+      _deliveryQuote = quote;
+      _deliveryQuoting = false;
+    });
+  }
+
+  /// "With Delivery" chosen: prompt the vehicle, then the point. Both are
+  /// re-runnable from the receipt block below, so changing your mind never
+  /// costs the buyer their place.
+  Future<void> _startDeliveryFlow() async {
+    if (_deliveryFlowRunning) return;
+    _deliveryFlowRunning = true;
+    try {
+      if (_deliveryVehicleId == null) await _chooseVehicleType();
+      if (!mounted) return;
+      if (_deliveryLat == null || _deliveryLng == null) {
+        await _chooseDeliveryPoint();
+      }
+    } finally {
+      _deliveryFlowRunning = false;
+    }
+  }
+
+  /// The delivery option's receipt: what was chosen, what the server priced,
+  /// and the two controls that change it — all in place, so a buyer who
+  /// changes their mind never restarts checkout.
+  Widget _deliveryReceipt() {
+    final quote = _deliveryQuote;
+    final hasPoint = _deliveryLat != null && _deliveryLng != null;
+    final currency =
+        _items.isNotEmpty ? _items.first.currency : 'ETB';
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppTheme.primaryGreen.withOpacity(0.05),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppTheme.primaryGreen.withOpacity(0.25)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  _deliveryVehicleName == null
+                      ? 'Choose a delivery vehicle'
+                      : '$_deliveryVehicleName delivery',
+                  style: const TextStyle(
+                      fontSize: 13, fontWeight: FontWeight.w600),
+                ),
+              ),
+              TextButton(
+                onPressed: _chooseVehicleType,
+                child: Text(_deliveryVehicleName == null ? 'Choose' : 'Change'),
+              ),
+            ],
+          ),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  !hasPoint
+                      ? 'Set the delivery point on the map'
+                      : (_deliveryPlaceLabel ??
+                          '${_deliveryLat!.toStringAsFixed(4)}, '
+                              '${_deliveryLng!.toStringAsFixed(4)}'),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 13),
+                ),
+              ),
+              TextButton(
+                onPressed: _chooseDeliveryPoint,
+                child: Text(hasPoint ? 'Change' : 'Set on map'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          if (_deliveryQuoting)
+            const Row(
+              children: [
+                SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2)),
+                SizedBox(width: 8),
+                Text('Pricing the delivery…',
+                    style: TextStyle(fontSize: 12.5)),
+              ],
+            )
+          else if (quote != null && quote.hasValue)
+            Text(
+              'Distance ${quote.distanceKm?.toStringAsFixed(2) ?? '—'} km · '
+              'delivery fee ${quote.fee!.toStringAsFixed(2)} $currency '
+              '(ride rate for '
+              '${_deliveryVehicleName ?? 'this vehicle'} + platform markup)',
+              style: const TextStyle(fontSize: 12.5, height: 1.35),
+            )
+          else if (quote != null && !quote.ok)
+            // The server refused to price it and said why. Shown as the
+            // server's own sentence rather than a made-up number — a
+            // provider with no published point is a real state, not an
+            // error to hide.
+            Text(
+              quote.message ??
+                  'A delivery fee could not be calculated for this order.',
+              style: const TextStyle(
+                  fontSize: 12.5,
+                  height: 1.35,
+                  color: AppTheme.textMuted),
+            )
+          else if (!hasPoint)
+            const Text(
+              'Choose a point on the map and the delivery fee is calculated '
+              'from the provider\'s location to yours.',
+              style: TextStyle(
+                  fontSize: 12.5, height: 1.35, color: AppTheme.textMuted),
+            ),
+          const SizedBox(height: 4),
+          TextButton(
+            onPressed: () => setState(() {
+              _fulfillmentTouched = true;
+              _fulfillmentMode = 'SELF_PICKUP';
+            }),
+            style: TextButton.styleFrom(
+              padding: EdgeInsets.zero,
+              visualDensity: VisualDensity.compact,
+            ),
+            child: const Text('Remove delivery — I will pick it up',
+                style: TextStyle(fontSize: 12.5)),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _pickScreenshot() async {
     // Downscaled like every other bucket upload in the app. payment-proofs
     // allows 10MB, which hides the problem on most phones but not on a
@@ -395,6 +689,13 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
         if (_fulfillmentMode == 'DELIVERY' &&
             _addressCtrl.text.trim().isNotEmpty)
           'Delivery: ${_addressCtrl.text.trim()}',
+        // Part 10: what the delivery cost and why, on the order itself. The
+        // server re-prices it, so this is a record of the answer rather than
+        // the number charged.
+        if (_fulfillmentMode == 'DELIVERY' && _deliveryFee > 0)
+          'Delivery fee: ${_deliveryFee.toStringAsFixed(2)}'
+              '${_deliveryVehicleName != null ? ' ($_deliveryVehicleName)' : ''}'
+              '${_deliveryQuote?.distanceKm != null ? ', ${_deliveryQuote!.distanceKm} km' : ''}',
         if (_refCtrl.text.trim().isNotEmpty)
           'Payment ref: ${_refCtrl.text.trim()}',
       ];
@@ -407,6 +708,17 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
         'fulfillment_mode': _fulfillmentMode,
         if (_fulfillmentMode == 'DELIVERY')
           'delivery_address': _addressCtrl.text.trim(),
+        // The delivery pricing inputs. Coordinates and a vehicle category, NOT
+        // a fee: the Edge Function resolves the provider's own point and
+        // prices the trip through the same delivery quote this screen showed.
+        // Sending a fee from here would be a second pricing rule the client
+        // could lie about.
+        if (_fulfillmentMode == 'DELIVERY' && _deliveryLat != null)
+          'delivery_lat': _deliveryLat,
+        if (_fulfillmentMode == 'DELIVERY' && _deliveryLng != null)
+          'delivery_lng': _deliveryLng,
+        if (_fulfillmentMode == 'DELIVERY' && _deliveryVehicleId != null)
+          'vehicle_category_id': _deliveryVehicleId,
       });
       final data = Map<String, dynamic>.from(result.data as Map);
       final order = data['order'] as Map<String, dynamic>?;
@@ -615,6 +927,47 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
                             // charged to the provider, never the buyer, so
                             // the buyer sees product price and (when there is
                             // one) delivery — the total is what they pay.
+                            // Part 10: when delivery has been priced, the
+                            // breakdown is shown as its two parts — product
+                            // price and delivery fee — and the total is their
+                            // sum. With self-pickup (or before a delivery has
+                            // been priced) there is one line, exactly as
+                            // before, so nothing about the ordinary checkout
+                            // changed shape.
+                            if (_deliveryFee > 0) ...[
+                              Row(
+                                mainAxisAlignment:
+                                    MainAxisAlignment.spaceBetween,
+                                children: [
+                                  const Text('Product price',
+                                      style: TextStyle(fontSize: 13)),
+                                  Text(
+                                    '${_total.toStringAsFixed(2)} '
+                                    '${_items.first.currency}',
+                                    style: const TextStyle(fontSize: 13),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 6),
+                              Row(
+                                mainAxisAlignment:
+                                    MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Text(
+                                    _deliveryVehicleName == null
+                                        ? 'Delivery fee'
+                                        : 'Delivery fee (${_deliveryVehicleName})',
+                                    style: const TextStyle(fontSize: 13),
+                                  ),
+                                  Text(
+                                    '${_deliveryFee.toStringAsFixed(2)} '
+                                    '${_items.first.currency}',
+                                    style: const TextStyle(fontSize: 13),
+                                  ),
+                                ],
+                              ),
+                              const Divider(height: 20),
+                            ],
                             Row(
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
@@ -623,7 +976,7 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
                                         fontSize: 14,
                                         fontWeight: FontWeight.w700)),
                                 Text(
-                                  '${_total.toStringAsFixed(2)} '
+                                  '${_payableTotal.toStringAsFixed(2)} '
                                   '${_items.first.currency}',
                                   style: const TextStyle(
                                       fontSize: 15,
@@ -678,10 +1031,19 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
                                   ? 'At the address you give'
                                   : 'Brought to your address',
                               selected: _fulfillmentMode == 'DELIVERY',
-                              onTap: () => setState(() {
-                                _fulfillmentTouched = true;
-                                _fulfillmentMode = 'DELIVERY';
-                              }),
+                              onTap: () {
+                                setState(() {
+                                  _fulfillmentTouched = true;
+                                  _fulfillmentMode = 'DELIVERY';
+                                });
+                                // Choosing delivery is what starts the three
+                                // steps — vehicle, location, map — so the
+                                // buyer is never left with a delivery order
+                                // and no fee. Switching BACK to pickup is the
+                                // other card, which simply drops the fee out
+                                // of the total.
+                                _startDeliveryFlow();
+                              },
                             ),
                           ),
                           const SizedBox(width: 10),
@@ -715,6 +1077,8 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
                           maxLines: 2,
                           hint: 'Street, area, city',
                         ),
+                        const SizedBox(height: 12),
+                        _deliveryReceipt(),
                         const SizedBox(height: 16),
                       ],
                       if (_fulfillmentMode == 'SELF_PICKUP') ...[

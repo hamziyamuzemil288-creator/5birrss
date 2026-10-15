@@ -42,6 +42,12 @@ interface OrderCreateBody {
   // Phase 4: fulfillment selection (additive, optional).
   fulfillment_mode?: "DELIVERY" | "SELF_PICKUP";
   delivery_address?: string;
+  // Part 10: the delivery PRICING INPUTS — never a fee. The fee is computed
+  // here, by the same RPC the buyer's checkout quoted with, so the number on
+  // the checkout screen and the number charged are one number.
+  delivery_lat?: number;
+  delivery_lng?: number;
+  vehicle_category_id?: string;
 }
 
 const MAX_ITEMS_PER_ORDER = 50;
@@ -129,7 +135,11 @@ Deno.serve(async (req: Request) => {
     // sold out.
     const { data: provider, error: providerError } = await admin
       .from("provider_profiles")
-      .select("id, status")
+      // Part 10: the provider's own registered point and city. Read here (with
+      // the service key) rather than taken from the client: it is the point
+      // the delivery distance is measured FROM, and the buyer may not even
+      // read it — it is released only after a payment proof is verified.
+      .select("id, status, location_lat, location_lng, city")
       .eq("id", body.provider_id)
       .maybeSingle();
 
@@ -243,7 +253,82 @@ Deno.serve(async (req: Request) => {
       subtotal += unitPriceOf(product) * item.quantity;
     }
 
-    const total = Math.round(subtotal * 100) / 100; // round to cents/kobo-equivalent
+    // Phase 4: fulfillment mode (defaults to DELIVERY for old clients).
+    const fulfillmentMode =
+      body.fulfillment_mode === "SELF_PICKUP" ? "SELF_PICKUP" : "DELIVERY";
+    if (fulfillmentMode === "DELIVERY" &&
+        !(body.delivery_address ?? "").trim()) {
+      return json({ error: "Delivery requires an address" }, 400);
+    }
+
+    // ── Part 10: the delivery fee ──
+    //
+    // Priced by quote_delivery_fee — the SAME reader the buyer's checkout
+    // quoted with (FeeResolver.deliveryFee). That function resolves the
+    // provider's own registered point, measures the distance to the buyer's
+    // point, prices it through calculate_fare_estimate_at (the fare
+    // create_ride_request charges a ride with) and applies the platform
+    // markup products.display_price is generated from. No arithmetic happens
+    // here, which is the point: a second copy of the pricing rule is what
+    // makes a quoted fee and a charged fee differ.
+    //
+    // A fee is added ONLY when the server could price this delivery. When it
+    // could not — the provider has published no point, or the buyer sent no
+    // point — the order is placed at the product price and the reason is
+    // logged, rather than charging a number nobody could justify. The buyer's
+    // checkout shows the same sentence from the same function.
+    let deliveryFee = 0;
+    let deliveryQuoteNote: string | null = null;
+
+    const lat = Number(body.delivery_lat);
+    const lng = Number(body.delivery_lng);
+    const hasBuyerPoint = Number.isFinite(lat) && Number.isFinite(lng) &&
+      Math.abs(lat) <= 90 && Math.abs(lng) <= 180;
+
+    if (fulfillmentMode === "DELIVERY" && hasBuyerPoint) {
+      const { data: quote, error: quoteError } = await admin.rpc(
+        "quote_delivery_fee",
+        {
+          p_provider_id: body.provider_id,
+          p_delivery_lat: lat,
+          p_delivery_lng: lng,
+          p_vehicle_category_id: body.vehicle_category_id ?? null,
+          p_city: null,
+        },
+      );
+
+      if (quoteError) {
+        // Not fatal: an order at the product price is still an order the buyer
+        // asked for. Logged so a real fault (a missing grant) is visible.
+        console.error("order-create: delivery quote failed", quoteError);
+      } else {
+        const q = (quote ?? {}) as {
+          ok?: boolean;
+          fee?: unknown;
+          distance_km?: unknown;
+          reason?: unknown;
+        };
+        const fee = Number(q.fee);
+        if (q.ok === true && Number.isFinite(fee) && fee >= 0) {
+          deliveryFee = Math.round(fee * 100) / 100;
+          deliveryQuoteNote =
+            `Delivery fee: ${deliveryFee.toFixed(2)}` +
+            (body.vehicle_category_id ? ` (vehicle ${body.vehicle_category_id})` : "") +
+            (q.distance_km != null ? `, ${q.distance_km} km` : "");
+        } else {
+          console.warn(
+            "order-create: delivery could not be priced",
+            q.reason,
+          );
+        }
+      }
+    } else if (fulfillmentMode === "DELIVERY") {
+      console.warn(
+        "order-create: DELIVERY with no buyer point — order placed at the product price",
+      );
+    }
+
+    const total = Math.round((subtotal + deliveryFee) * 100) / 100;
 
     // 4. Atomic write via SECURITY DEFINER SQL function.
     const itemsPayload = cleanedItems.map((item) => ({
@@ -252,13 +337,13 @@ Deno.serve(async (req: Request) => {
       unit_price: unitPriceOf(productById.get(item.product_id)!), // server value
     }));
 
-    // Phase 4: fulfillment mode (defaults to DELIVERY for old clients).
-    const fulfillmentMode =
-      body.fulfillment_mode === "SELF_PICKUP" ? "SELF_PICKUP" : "DELIVERY";
-    if (fulfillmentMode === "DELIVERY" &&
-        !(body.delivery_address ?? "").trim()) {
-      return json({ error: "Delivery requires an address" }, 400);
-    }
+    // The delivery fee is recorded on the order's own note as well as in its
+    // total, so the provider's and the buyer's order screens can state what
+    // part of the amount was the trip.
+    const noteWithDelivery = [body.note ?? "", deliveryQuoteNote ?? ""]
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
+      .join(" | ");
 
     const { data: created, error: rpcError } = await admin.rpc(
       "create_order_secure",
@@ -268,7 +353,7 @@ Deno.serve(async (req: Request) => {
         p_items: itemsPayload,
         p_total_amount: total,
         p_currency: currency,
-        p_note: body.note ?? null,
+        p_note: noteWithDelivery.length > 0 ? noteWithDelivery : null,
         p_fulfillment_mode: fulfillmentMode,
         p_delivery_address: body.delivery_address ?? null,
         p_city: null,
@@ -280,7 +365,15 @@ Deno.serve(async (req: Request) => {
       return json({ error: sanitizeError(rpcError.message) }, 400);
     }
 
-    return json({ order: created }, 201);
+    return json(
+      {
+        order: created,
+        // Additive: the client can show what the trip cost without re-deriving
+        // it. Absent (0) when the delivery could not be priced.
+        delivery_fee: deliveryFee,
+      },
+      201,
+    );
   } catch (e) {
     // Structured: the server log keeps the real cause, the client gets a
     // plain sentence and a request_id it can quote. Previously this returned

@@ -28,6 +28,37 @@ class FeeQuote {
   bool get hasValue => value != null;
 }
 
+/// One delivery fee as the server resolved it, with the distance it priced.
+///
+/// [ok] is false when the server could not price a delivery at all — the
+/// provider has published no point, or the buyer has not chosen one. That is
+/// reported as a REASON, never as a zero: a delivery fee invented when the
+/// distance is unknown would be a number nobody could justify.
+class DeliveryQuote {
+  const DeliveryQuote({
+    required this.ok,
+    required this.reason,
+    required this.fee,
+    required this.distanceKm,
+    this.message,
+  });
+
+  final bool ok;
+  final String? reason;
+  final double? fee;
+  final double? distanceKm;
+  final String? message;
+
+  bool get hasValue => ok && fee != null;
+
+  static const DeliveryQuote unavailable = DeliveryQuote(
+    ok: false,
+    reason: 'UNAVAILABLE',
+    fee: null,
+    distanceKm: null,
+  );
+}
+
 /// The app's single door to every fee the platform charges.
 ///
 /// ## The contract this class exists to keep
@@ -69,6 +100,14 @@ class FeeResolver {
     'approve_wallet_recharge': 'fee_activation',
     'calculate_booking_fee_at': 'calculate_booking_fee_at',
     'create_provider_product': 'fee_product_listing_fee',
+    // Part 10: the delivery fee a buyer is quoted at checkout and the fee the
+    // `order-create` Edge Function adds to the order total are the same number
+    // because both read THIS one function. It prices through
+    // calculate_fare_estimate_at — the reader create_ride_request charges a
+    // ride with — and applies the markup products.display_price is generated
+    // from, so a delivery is the ride fare plus the product markup and not a
+    // second formula.
+    'order-create (delivery fee)': 'quote_delivery_fee',
   };
 
   /// The category and city a PROVIDER's fees resolve against, from
@@ -150,6 +189,47 @@ class FeeResolver {
       } catch (_) {
         return const FeeQuote(value: null, source: 'calculate_fare_estimate_at');
       }
+    }
+  }
+
+  /// The delivery fee for a provider -> buyer distance, from
+  /// `quote_delivery_fee` — the SAME reader the `order-create` Edge Function
+  /// prices the order with, so the number on this screen and the number
+  /// charged cannot come from two rules.
+  ///
+  /// The provider's coordinates are deliberately NOT parameters: they are
+  /// private (released to a buyer only after a verified payment), so the
+  /// server resolves them. That also means this call is the only way a client
+  /// can learn the distance, and it never approximates from the city — an
+  /// unpriceable delivery comes back as [DeliveryQuote.ok] false with a
+  /// stated reason.
+  Future<DeliveryQuote> deliveryFee({
+    required String providerId,
+    required double deliveryLat,
+    required double deliveryLng,
+    String? vehicleCategoryId,
+    String? city,
+  }) async {
+    try {
+      final res = await _client.rpc('quote_delivery_fee', params: {
+        'p_provider_id': providerId,
+        'p_delivery_lat': deliveryLat,
+        'p_delivery_lng': deliveryLng,
+        if (vehicleCategoryId != null)
+          'p_vehicle_category_id': vehicleCategoryId,
+        if (city != null) 'p_city': city,
+      });
+      if (res is! Map) return DeliveryQuote.unavailable;
+      final row = Map<String, dynamic>.from(res);
+      return DeliveryQuote(
+        ok: row['ok'] == true,
+        reason: row['reason'] as String?,
+        fee: (row['fee'] as num?)?.toDouble(),
+        distanceKm: (row['distance_km'] as num?)?.toDouble(),
+        message: row['message'] as String?,
+      );
+    } catch (_) {
+      return DeliveryQuote.unavailable;
     }
   }
 

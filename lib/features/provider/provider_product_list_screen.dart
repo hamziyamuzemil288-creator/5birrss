@@ -62,33 +62,92 @@ class _State extends State<ProviderProductListScreen> {
     }
   }
 
-  Future<void> _delete(String id) async {
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Delete Product'),
-        content: const Text('This will permanently remove the product.'),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel')),
-          TextButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text('Delete',
-                  style: TextStyle(color: AppTheme.error))),
-        ],
-      ),
-    );
-    if (confirm != true) return;
+  /// Whether this listing is visible to buyers. `products.is_active` is the
+  /// flag every public read already filters on, so this switch and the home
+  /// feed cannot disagree.
+  bool _isVisible(Map<String, dynamic> p) => p['is_active'] != false;
+
+  /// Hide or show one listing, by the same flag the public reads use.
+  Future<void> _setVisibility(String id, bool visible) async {
     try {
-      await Supabase.instance.client
-          .from('products')
-          .update({'is_active': false}).eq('id', id);
-      _load();
+      final res = await Supabase.instance.client.rpc(
+        'provider_set_product_visibility',
+        params: {'p_product_id': id, 'p_visible': visible},
+      );
+      if (!mounted) return;
+      final message = res is Map ? res['message'] as String? : null;
+      await _load();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(message ??
+            (visible
+                ? 'Buyers can see this listing again.'
+                : 'Buyers can no longer see this listing.')),
+      ));
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text(friendlyError(e, context: 'Could not complete that action'))));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(friendlyError(e,
+                context: 'Could not change who can see this'))));
+      }
+    }
+  }
+
+  /// Delete — or, when the listing has order history, hide it instead.
+  ///
+  /// The dialog says which one is about to happen where it can be known, but
+  /// the RULE is the server's: `provider_delete_product` counts the order
+  /// lines and only really deletes when there are none, and the `order_items`
+  /// foreign key (NO ACTION) refuses a hard delete that would rewrite order
+  /// history whatever a client asks for. So the confirm dialog is a
+  /// courtesy, and the answer shown afterwards is what actually happened.
+  Future<void> _delete(String id, bool visible) async {
+    if (visible) {
+      final confirm = await showDialog<bool>(
+        context: context,
+        builder: (_) => AlertDialog(
+          title: const Text('Delete this listing?'),
+          content: const Text(
+              'If it has never been ordered, it and its photos are removed for '
+              'good.\n\nIf it appears in any past order, it is HIDDEN instead '
+              '— buyers stop seeing it, and your order history stays intact.\n\n'
+              'To take it off sale without deleting anything, use Hide.'),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancel')),
+            TextButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Delete',
+                    style: TextStyle(color: AppTheme.error))),
+          ],
+        ),
+      );
+      if (confirm != true) return;
+    }
+
+    try {
+      final res = await Supabase.instance.client.rpc(
+        'provider_delete_product',
+        params: {'p_product_id': id},
+      );
+      if (!mounted) return;
+      final action = res is Map ? res['action'] as String? : null;
+      final message = res is Map ? res['message'] as String? : null;
+      await _load();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(message ??
+            (action == 'hidden'
+                ? 'This listing has order history, so it was hidden instead of '
+                    'deleted.'
+                : 'The listing and its photos are gone.')),
+        duration: const Duration(seconds: 5),
+      ));
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(friendlyError(e, context: 'Could not delete that'))));
       }
     }
   }
@@ -251,33 +310,85 @@ class _State extends State<ProviderProductListScreen> {
                                             ? AppTheme.success
                                             : AppTheme.error)),
                               ),
+                              // A hidden listing says so on the provider's own
+                              // list: it is invisible to buyers, and it must
+                              // not look identical to a live one here.
+                              if (!_isVisible(p)) ...[
+                                const SizedBox(width: 8),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 6, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: AppTheme.textMuted.withOpacity(0.15),
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: const Text('Hidden',
+                                      style: TextStyle(
+                                          fontSize: 10,
+                                          color: AppTheme.textMuted)),
+                                ),
+                              ],
                             ],
                           ),
-                          trailing: PopupMenuButton(
-                            itemBuilder: (_) => [
-                              const PopupMenuItem(
-                                  value: 'edit', child: Text('Edit')),
-                              PopupMenuItem(
-                                value: 'toggle',
-                                child: Text((p['is_available'] ?? true)
-                                    ? 'Mark Unavailable'
-                                    : 'Mark Available'),
+                          // The two controls, both on the row rather than
+                          // buried in a submenu: a labelled switch for "can
+                          // buyers see this" and a delete that says what it
+                          // will do.
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Switch(
+                                    value: _isVisible(p),
+                                    activeThumbColor: AppTheme.primaryGreen,
+                                    onChanged: (v) =>
+                                        _setVisibility(p['id'], v),
+                                  ),
+                                  Text(_isVisible(p) ? 'Visible' : 'Hidden',
+                                      style: const TextStyle(
+                                          fontSize: 9,
+                                          color: AppTheme.textMuted)),
+                                ],
                               ),
-                              const PopupMenuItem(
-                                  value: 'delete',
-                                  child: Text('Delete',
-                                      style: TextStyle(color: AppTheme.error))),
+                              PopupMenuButton(
+                                itemBuilder: (_) => [
+                                  const PopupMenuItem(
+                                      value: 'edit', child: Text('Edit')),
+                                  PopupMenuItem(
+                                    value: 'visibility',
+                                    child: Text(_isVisible(p)
+                                        ? 'Hide from buyers'
+                                        : 'Show to buyers'),
+                                  ),
+                                  PopupMenuItem(
+                                    value: 'toggle',
+                                    child: Text((p['is_available'] ?? true)
+                                        ? 'Mark Unavailable'
+                                        : 'Mark Available'),
+                                  ),
+                                  const PopupMenuItem(
+                                      value: 'delete',
+                                      child: Text('Delete',
+                                          style: TextStyle(
+                                              color: AppTheme.error))),
+                                ],
+                                onSelected: (v) {
+                                  if (v == 'edit') {
+                                    context
+                                        .push('/provider/products/${p['id']}');
+                                  } else if (v == 'visibility') {
+                                    _setVisibility(p['id'], !_isVisible(p));
+                                  } else if (v == 'toggle') {
+                                    _toggleAvailability(
+                                        p['id'], p['is_available'] ?? true);
+                                  } else if (v == 'delete') {
+                                    _delete(p['id'], _isVisible(p));
+                                  }
+                                },
+                              ),
                             ],
-                            onSelected: (v) {
-                              if (v == 'edit') {
-                                context.push('/provider/products/${p['id']}');
-                              } else if (v == 'toggle') {
-                                _toggleAvailability(
-                                    p['id'], p['is_available'] ?? true);
-                              } else if (v == 'delete') {
-                                _delete(p['id']);
-                              }
-                            },
                           ),
                         ),
                       );

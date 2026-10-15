@@ -5,6 +5,7 @@ import '../../core/resilience/failure_mapper.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/widgets/async_view.dart';
 import '../../core/utils/order_number_format.dart';
+import 'pending_availability_section.dart';
 
 class UserOrdersScreen extends StatefulWidget {
   const UserOrdersScreen({super.key});
@@ -162,6 +163,12 @@ class _UserOrdersScreenState extends State<UserOrdersScreen> {
               ),
             );
           },
+          // Part 9b: an availability request that is WAITING is not an order
+          // yet, so it has no row in this list — but it is the thing the buyer
+          // is waiting on, and Orders is where they go to check. It reads the
+          // live row (realtime + poll), so it is correct after an app
+          // minimise, a navigation away, or a fresh cold start.
+          header: const PendingAvailabilitySection(),
           emptyBuilder: (context) => _buildEmptyState(),
         ),
       ),
@@ -175,6 +182,10 @@ class _UserOrdersScreenState extends State<UserOrdersScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            // A buyer with a pending request and no orders yet is the common
+            // case, not the edge one: the request is made BEFORE the order
+            // exists. Empty means "no orders", not "nothing to see".
+            const PendingAvailabilitySection(),
             // Decorative icon with animated ring
             Container(
               width: 100,

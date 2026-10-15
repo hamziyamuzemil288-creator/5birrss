@@ -9441,6 +9441,185 @@ def check_registration_rework_is_wired() -> list[str]:
     return problems
 
 
+# ---------------------------------------------------------------------------
+# the Parts 9-11 rework: every promised half is still connected
+# ---------------------------------------------------------------------------
+def check_parts_9_to_11_are_wired() -> list[str]:
+    """Push for every notification, a wait that lives in the row, the delivery
+    fee reusing the ride fare, and a listing that can be hidden or deleted.
+
+    Each part is a server half and a client half, and either can quietly
+    vanish: a trigger nobody attached, a section nobody renders, a quote that
+    stopped calling the fare reader, a provider control that went back to
+    claiming it deletes when it hides. Each needle is the smallest string that
+    proves one half is still wired to the other, and each failure names the
+    part it protects.
+    """
+    problems: list[str] = []
+    mig_dir = ROOT / "supabase" / "migrations"
+
+    def mig(name: str) -> str:
+        path = mig_dir / name
+        if not path.is_file():
+            problems.append(
+                "%s is missing — a part of the rework has no server half"
+                % name)
+            return ""
+        return _read(path)
+
+    m_push = mig("20261015000001_every_notification_also_leaves_as_a_push.sql")
+    m_fee = mig("20261015000002_delivery_fee_is_the_ride_fare_reused.sql")
+    m_prod = mig("20261015000003_provider_listings_can_be_hidden_or_deleted"
+                 ".sql")
+
+    # ── Part 9a: one dispatch point, on the table, through the existing sender
+    for needle, why in (
+        ("trg_notifications_push_dispatch",
+         "Part 9a: the AFTER INSERT trigger that turns every notification into "
+         "a push is gone, so the in-app inbox is the only channel again"),
+        ("create_n8n_event",
+         "Part 9a: the push no longer goes through the repository's existing "
+         "dispatcher — a second pathway"),
+        ("fcm_tokens",
+         "Part 9a: the push carries no device tokens"),
+        ("push_enabled",
+         "Part 9a: the stored push preference is ignored again"),
+        ("assert_every_notification_leaves_as_a_push",
+         "Part 9a: nothing asserts that every notification also dispatches a "
+         "push"),
+        ("assert_availability_wait_is_server_state",
+         "Part 9b: nothing asserts the availability wait is the row's state"),
+    ):
+        if m_push and needle not in m_push:
+            problems.append(
+                "20261015000001_every_notification_also_leaves_as_a_push.sql: "
+                "%s" % why)
+
+    # ── Part 10: the delivery fee is the ride fare, quoted once
+    for needle, why in (
+        ("calculate_fare_estimate_at",
+         "Part 10: the delivery fee no longer calls the ride fare reader"),
+        ("platform_display_markup",
+         "Part 10: the delivery markup is no longer the product markup"),
+        ("quote_delivery_fee",
+         "Part 10: there is no single callable the checkout and the order "
+         "both price through"),
+        ("PROVIDER_HAS_NO_LOCATION",
+         "Part 10: an unpriceable delivery would be approximated from the "
+         "city again instead of being stated"),
+        ("GENERATED ALWAYS AS (public.platform_display_markup(price))",
+         "Part 10: products.display_price stopped being generated from the "
+         "one markup rule, so the two markups can drift"),
+    ):
+        if m_fee and needle not in m_fee:
+            problems.append(
+                "20261015000002_delivery_fee_is_the_ride_fare_reused.sql: %s"
+                % why)
+
+    # ── Part 11: hide always, delete only when nothing references the listing
+    for needle, why in (
+        ("provider_delete_product",
+         "Part 11: the provider's delete door is gone"),
+        ("provider_set_product_visibility",
+         "Part 11: the provider can no longer hide a listing"),
+        ("order_items",
+         "Part 11: the delete no longer counts order history"),
+        ("is_active = false",
+         "Part 11: a listing with order history would be hard-deleted again"),
+        ("delete from public.products",
+         "Part 11: 'delete' hides for every listing again"),
+        ("assert_order_history_blocks_a_hard_delete",
+         "Part 11: nothing asserts the order-history guard"),
+        ("assert_hidden_listings_leave_every_public_surface",
+         "Part 11: nothing asserts a hidden listing leaves every public "
+         "surface"),
+    ):
+        if m_prod and needle not in m_prod:
+            problems.append(
+                "20261015000003_provider_listings_can_be_hidden_or_deleted"
+                ".sql: %s" % why)
+
+    # The order_items foreign key is the unskippable guard. NO ACTION ('a') is
+    # the value that refuses the delete; CASCADE would rewrite order history.
+    fk_src = "\n".join(
+        _read(p) for p in migration_files()
+        if "order_items" in _read(p)
+        and "references products" in _read(p).lower())
+    if not re.search(
+            r"order_items[^;]*product_id[^;]*references\s+(?:public\.)?products"
+            r"\s*\(id\)\s*(?:,|\))",
+            fk_src, re.IGNORECASE):
+        problems.append(
+            "Part 11: no migration declares order_items.product_id -> products "
+            "without an ON DELETE action, so a hard delete of a sold listing "
+            "is unguarded")
+    if re.search(
+            r"order_items[^;]*product_id[^;]*references\s+(?:public\.)?products"
+            r"\s*\(id\)\s*on\s+delete\s+cascade",
+            fk_src, re.IGNORECASE | re.DOTALL):
+        problems.append(
+            "Part 11: order_items.product_id -> products is ON DELETE CASCADE, "
+            "so deleting a listing would take a provider's order history with "
+            "it")
+
+    # ── client halves ──
+    def dart(rel: str, *needles: str, why: str) -> str:
+        text = _read(LIB / rel)
+        if not text:
+            problems.append("lib/%s is missing — %s" % (rel, why))
+            return text
+        for needle in needles:
+            if needle not in text:
+                problems.append("lib/%s: %s (no %r)" % (rel, why, needle))
+        return text
+
+    dart("core/services/fee_resolver.dart",
+         "quote_delivery_fee", "DeliveryQuote",
+         why="Part 10: the app has no door to the delivery quote, so the "
+             "delivery fee would be computed client-side")
+    dart("features/user/user_checkout_screen.dart",
+         "FeeResolver.instance.deliveryFee", "_chooseVehicleType",
+         "_chooseDeliveryPoint", "WhereToPicker.open", "_payableTotal",
+         why="Part 10: checkout lost a step of the delivery option — the "
+             "vehicle, the location prompt, the map, the server quote, or the "
+             "combined total")
+    dart("features/user/user_orders_screen.dart", "PendingAvailabilitySection",
+         why="Part 9b: a waiting availability request is invisible from Orders "
+             "again")
+    dart("features/user/pending_availability_section.dart",
+         "availability_requests", "ResilientSubscription", "PENDING",
+         why="Part 9b: the Orders section lost its live read of the request "
+             "row or the status wording")
+    dart("features/provider/provider_product_list_screen.dart",
+         "provider_set_product_visibility", "provider_delete_product",
+         "Hidden",
+         why="Part 11: the provider's list lost the visibility toggle, the "
+             "delete door, or the marker that a listing is hidden")
+
+    fn = _read(FUNCTIONS / "order-create" / "index.ts")
+    if not fn:
+        problems.append("supabase/functions/order-create/index.ts is missing — "
+                        "Part 10 has no charge half")
+    else:
+        for needle, why in (
+            ("quote_delivery_fee",
+             "Part 10: the order is no longer priced by the same quote the "
+             "checkout showed"),
+            ("delivery_lat",
+             "Part 10: the order cannot receive the point it is priced to"),
+        ):
+            if needle not in fn:
+                problems.append(
+                    "supabase/functions/order-create/index.ts: %s" % why)
+
+    if not (ROOT / "test" / "delivery_fee_reuses_the_ride_fare_test.dart").is_file():
+        problems.append(
+            "test/delivery_fee_reuses_the_ride_fare_test.dart is missing — the "
+            "fare reuse is no longer checked anywhere")
+
+    return problems
+
+
 CHECKS = [
     ("a listing carries its own type from its own category, and a booking "
      "behaves like a booking end to end",
@@ -9590,6 +9769,9 @@ CHECKS = [
      check_one_action_per_listing_and_no_provider_control_where_buyers_browse),
     ("the Parts 1-8 registration rework is wired: server halves, client doors",
      check_registration_rework_is_wired),
+    ("Parts 9-11: every notification also pushes, the delivery fee is the ride "
+     "fare, and a sold listing is hidden rather than deleted",
+     check_parts_9_to_11_are_wired),
 ]
 
 
