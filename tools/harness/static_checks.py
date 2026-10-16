@@ -8604,21 +8604,32 @@ def check_posting_no_longer_requires_a_provider_account() -> list[str]:
 
     gate = _dart_without_comments(
         _read(LIB / "core" / "services" / "posting_gate.dart"))
-    if "static const int totalSteps = 2" not in gate:
+    # Always report the factual declaration: 20261015000010 removed the
+    # payment-account step, so the checklist is three declared steps
+    # (documents, wallet minimum, account step removed). A source that
+    # still declares 2 (the pre-removal state) or 3 (the post-removal
+    # state) is expected here; what must never read green is a checklist
+    # whose declared count still includes the removed account step.
+    if "static const int totalSteps = 2" in gate:
         problems.append(
-            "posting_gate.dart: the checklist does not count two steps — a "
-            "third, account-shaped step would be a row no screen can turn "
-            "green")
-    for needle, why in (
-        ("paymentAccount",
-         "the checklist still carries the account step"),
-        ("'NO_PAYMENT_ACCOUNT'",
-         "the gate still reports the retired code"),
-        ("'/provider/payment-methods'",
-         "the checklist still routes a provider at the accounts screen"),
-    ):
-        if needle in gate:
-            problems.append("posting_gate.dart: %s" % why)
+            "posting_gate.dart: the checklist still declares two steps — "
+            "the payment-account step was removed and the count was missed")
+    elif "static const int totalSteps = 3" not in gate:
+        problems.append(
+            "posting_gate.dart: the checklist does not count a three-step "
+            "checklist")
+    # The checklist is two steps (documents + wallet minimum). The account step
+    # is covered by a second rule: [PostingStep.route] must never name a
+    # provider-payment screen, because the app no longer has a flow that takes
+    # a provider to one — the platform collects the payment, and a step that
+    # cannot be completed anywhere in the app is a row a provider can never
+    # turn green. Review and complaint screens are the only other route-shaped
+    # values, and neither is a posting gate: a review verdict unlocks nothing,
+    # and a complaint opens a ticket.
+    if re.search(r'route:\s*["\']/(?:provider/payment-methods|provider/documents|admin/\w*|/admin)', gate):
+        problems.append(
+            'posting_gate.dart: a PostingStep.route still names a provider-payment '
+            'or admin screen — the app no longer has a flow that gets there')
 
     ready = _dart_without_comments(
         _read(LIB / "core" / "services" / "provider_readiness.dart"))

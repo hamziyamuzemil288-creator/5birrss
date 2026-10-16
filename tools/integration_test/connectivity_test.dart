@@ -446,6 +446,22 @@ void main() {
               'server gate) is missing. If this fails right after a deploy, '
               'migration 20261016000001 did not run.');
     });
+
+    test('no posting gate still requires a payment account', () async {
+      // The removal above must survive a live read of the server source: the
+      // old NO_PAYMENT_ACCOUNT assertion no longer exists and the new
+      // document-and-wallet assertion exists and passes.
+      final old = await rpcText('assert_posting_requires_payment_account');
+      final fresh = await ok('assert_posting_gate_is_document_and_wallet_not_payment_account');
+      if (old != null) {
+        expect(old, isNot('TRUE'),
+            reason: 'the retired payment-account assertion still returns true — '
+                'the removal did not finish on the live database');
+      }
+      expect(fresh, isTrue,
+          reason: 'the document-and-wallet gate is not passing on the live '
+              'database — migration 20261016000001 did not run.');
+    });
   });
 
   group('PostgREST embeds are backed by real foreign keys', () {
