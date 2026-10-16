@@ -145,6 +145,11 @@ EXCEPTION
     RETURN NULL;
 END;
 $$;
+-- The call site itself stays server-only. A client that could call it
+-- could notify any user id of its choosing.
+REVOKE ALL ON FUNCTION public.notify_user_once(text, uuid, public.notification_type, text, text, jsonb)
+  FROM public, anon, authenticated;
+
 
 COMMENT ON FUNCTION public.notify_user_once(text, uuid, public.notification_type, text, text, jsonb) IS
   'The call site for notifications attached to money movement and approvals. '
@@ -154,8 +159,7 @@ COMMENT ON FUNCTION public.notify_user_once(text, uuid, public.notification_type
   'swallows any error as a WARNING so a failed notice never rolls back the '
   'payment or approval it describes.';
 
-REVOKE ALL ON FUNCTION public.notify_user_once(text, uuid, public.notification_type, text, text, jsonb)
-  FROM public, anon, authenticated;
+-- revoke removed
 
 -- The index used by the outbox half of that check. Without it the second
 -- EXISTS is a sequential scan of a table that grows by one row per
