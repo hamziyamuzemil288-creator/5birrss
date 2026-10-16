@@ -8604,20 +8604,25 @@ def check_posting_no_longer_requires_a_provider_account() -> list[str]:
 
     gate = _dart_without_comments(
         _read(LIB / "core" / "services" / "posting_gate.dart"))
-    # Always report the factual declaration: 20261015000010 removed the
-    # payment-account step, so the checklist is three declared steps
-    # (documents, wallet minimum, account step removed). A source that
-    # still declares 2 (the pre-removal state) or 3 (the post-removal
-    # state) is expected here; what must never read green is a checklist
-    # whose declared count still includes the removed account step.
-    if "static const int totalSteps = 2" in gate:
+    # The declared count is the checklist's arithmetic, and it must be TWO:
+    # documents + the wallet minimum. Three is the pre-removal shape, and a
+    # third step nobody can complete is exactly what this rule exists to catch —
+    # `doneCount` adds only the document and wallet rows, so a count of 3 can
+    # never read anything but "0 of 3", "1 of 3", "2 of 3", and the dialog no
+    # longer renders an account row at all. The app's own
+    # test/posting_gate_test.dart pins the same two numbers ("2 of 2 done"), so
+    # a count of 3 fails that suite as well. The check went red on the correct
+    # value once (the regression 8d02ec6 left behind); the assertion is the
+    # count, not its direction.
+    if "static const int totalSteps = 3" in gate:
         problems.append(
-            "posting_gate.dart: the checklist still declares two steps — "
-            "the payment-account step was removed and the count was missed")
-    elif "static const int totalSteps = 3" not in gate:
+            "posting_gate.dart: the checklist still counts three steps — the "
+            "payment-account row was removed from the dialog, so the progress "
+            "line can only ever read '2 of 3 done'")
+    elif "static const int totalSteps = 2" not in gate:
         problems.append(
-            "posting_gate.dart: the checklist does not count a three-step "
-            "checklist")
+            "posting_gate.dart: the checklist does not count its two steps "
+            "(documents + wallet minimum)")
     # The checklist is two steps (documents + wallet minimum). The account step
     # is covered by a second rule: [PostingStep.route] must never name a
     # provider-payment screen, because the app no longer has a flow that takes

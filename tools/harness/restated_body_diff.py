@@ -579,6 +579,48 @@ FIXES: list[tuple[str, str, str, tuple[str, ...], tuple[str, ...], tuple[str, ..
             "ON CONFLICT (id) DO NOTHING;",
         ),
     ),
+    (
+        # 20261016000001's second read into pg_proc joined the namespace on
+        # `n.oid = p.proname`. Postgres has no `oid = name` operator, so every
+        # call to the assertion raised 42883 instead of answering -- and a
+        # plpgsql body is not analysed until the statement first runs, so the
+        # deploy that applied it succeeded, the whole-file parse and the body
+        # syntax gate stayed green, and the only thing that could see it was
+        # the live suite: Connectivity CI went red on both posting-gate tests
+        # (110 passed, 2 failed) with the report the assertion exists to make
+        # never having run at all.
+        #
+        # 20261016000002 restates the same body with the join repaired. This
+        # entry pins the repair in the mirror form: the corrected read of
+        # search_products is present, the shape that raised is gone, and no
+        # other line moved -- so a future restatement cannot quietly drop the
+        # fix, and the bad join cannot come back.
+        "assert_posting_gate_is_document_and_wallet_not_payment_account",
+        "20261016000001",
+        "20261016000002",
+        # The vocabulary the repair is allowed to touch: the two catalogues the
+        # broken join was made of, and the two columns it confused.
+        (
+            "pg_proc",
+            "pg_namespace",
+            "n.oid",
+            "proname",
+            "pronamespace",
+        ),
+        (
+            # the repaired statement, joined on the namespace's own oid
+            "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+            "WHERE n.nspname = 'public' AND p.proname = 'search_products';",
+        ),
+        (
+            # the shape that raised instead of answering: the namespace joined
+            # on a function NAME. The needle carries the WHERE that follows it,
+            # because `p.proname` is a prefix of `p.pronamespace` and a needle
+            # that stopped at the column would match the repaired line too.
+            "JOIN pg_namespace n ON n.oid = p.proname "
+            "WHERE n.nspname = 'public' AND p.proname = 'search_products';",
+        ),
+    ),
 ]
 
 

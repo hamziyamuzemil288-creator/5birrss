@@ -135,7 +135,7 @@ class PostingGateState {
   /// payment, so there is no account for a provider to publish and nothing to
   /// count here. Leaving the third step in would show every provider a step
   /// they can no longer complete anywhere in the app.
-  static const int totalSteps = 3;
+  static const int totalSteps = 2;
 
   /// What the server still enforces. The live assertion that matches this file
   /// is `assert_posting_gate_is_document_and_wallet_not_payment_account` in
@@ -528,7 +528,7 @@ class PostingGate {
   }
 }
 
-/// The prompt itself: three checklist steps, a progress line, and a button
+/// The prompt itself: two checklist steps, a progress line, and a button
 /// per missing step that goes to the screen (or sheet) that fixes it.
 ///
 /// Public so a widget test can drive the real dialog rather than a copy of
