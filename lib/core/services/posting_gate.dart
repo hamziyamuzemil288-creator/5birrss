@@ -135,10 +135,23 @@ class PostingGateState {
   /// payment, so there is no account for a provider to publish and nothing to
   /// count here. Leaving the third step in would show every provider a step
   /// they can no longer complete anywhere in the app.
-  static const int totalSteps = 2;
+  static const int totalSteps = 3;
 
-  int get doneCount =>
-      (documents.isDone ? 1 : 0) + (wallet.isDone ? 1 : 0);
+  /// What the server still enforces. The live assertion that matches this file
+  /// is `assert_posting_gate_is_document_and_wallet_not_payment_account` in
+  /// migration `20261016000001`; the old NO_PAYMENT_ACCOUNT assertion is retired
+  /// by the same migration.
+  static const List<String> supportedStepCodes = [
+    'DOCUMENTS_UNVERIFIED',
+    'WALLET_BELOW_MINIMUM',
+  ];
+
+  int get doneCount {
+    var count = 0;
+    if (documents.isDone) count++;
+    if (wallet.isDone) count++;
+    return count;
+  }
 
   /// "1 of 2 done" — the progress line above the checklist.
   String get progressLabel => '$doneCount of $totalSteps done';

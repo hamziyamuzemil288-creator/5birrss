@@ -427,17 +427,24 @@ void main() {
               'idempotency key — the posting gate is half-wired.');
     });
     test('no listing publishes or shows without a payment account', () async {
-      // Item 6: create_provider_product must refuse with
-      // NO_PAYMENT_ACCOUNT, and search_products (SECURITY DEFINER) plus the
-      // products_public_read policy must hide an account-less provider's
-      // listings from buyers. The blockers function must NOT carry the code
-      // — claim_ride shares it — so the assertion checks the three places
-      // the rule actually lives.
-      expect(await ok('assert_posting_requires_payment_account'), isTrue,
-          reason: 'The account gate lost a piece: an account-less provider '
-              'can publish, or their listings still show to buyers in '
-              'search or direct reads. If this fails right after a deploy, '
-              'migration 20261006000008 did not run.');
+      // Part 13: the platform collects the money, so a provider has no payment
+      // account to publish and nothing to add. Migration 20261016000001
+      // removes the now-dead NO_PAYMENT_ACCOUNT branch from create_provider_product
+      // and from the products_public_read / search_products visibility paths, and
+      // retires the old assertion that was gating the rule we just dropped. The
+      // surviving posting gate is documents (where required) + wallet minimum, and
+      // the app side still reads that same gate and still points at the right remedy
+      // screens. So this test now gates the OPPOSITE shape: a provider WITHOUT an
+      // account number must still be able to publish and be found, and the three
+      // server surfaces must agree they no longer require one.
+      expect(await ok('assert_posting_gate_is_document_and_wallet_not_payment_account'),
+          isTrue,
+          reason: 'The payment-account posting gate was not fully removed: '
+              'create_provider_product still refuses with NO_PAYMENT_ACCOUNT, or '
+              'search_products / products_public_read still hide providers without '
+              'a payment account, or provider_fulfilment_blockers() (the surviving '
+              'server gate) is missing. If this fails right after a deploy, '
+              'migration 20261016000001 did not run.');
     });
   });
 
