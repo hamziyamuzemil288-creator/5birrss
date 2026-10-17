@@ -57,9 +57,9 @@ enforce is something the client is trusted not to do.
 |-------|-----------|
 | `AppFailureMapper` | `safeCall`, `safe_realtime`, most newer services |
 | `ErrorLogger` → `client_error_logs` | `bootstrap.dart` (root), asserted by `assert_resilience_is_wired()` |
-| `AppErrorBoundary` | `bootstrap.dart` (root) and `user_dashboard.dart` |
+| `AppErrorBoundary` | `bootstrap.dart` (root), and `user_dashboard.dart` for the shell **and each of its four tabs** |
 | `ResilientFeed` (channel **and** poller together) | **nothing — see §5.1** |
-| `AsyncView` (loading / error / empty, content-preserving) | **nothing — see §5.2** |
+| `AsyncView` (loading / error / empty, content-preserving) | `user_orders_screen`, `user_notifications_screen` — see §5.2 |
 
 The outcome is mostly right even where the layering is wrong: a service that
 throws is caught by the calling screen's `friendlyError`, so a raw exception
@@ -428,6 +428,40 @@ land in the same three places or not at all. The predicate (`staff_scope_*`),
 the card that shows the assignment, and the list that filters on it. Two of
 three is a column.
 
+**One surface is one definition, and the definition names its data.** Three
+surfaces in this app were each implemented more than once, and in every case
+the copies drifted silently because each one was correct on its own screen:
+
+| What | The one definition | Who renders it | What it reads |
+|---|---|---|---|
+| The account | `AccountDashboard` (`lib/features/user/user_profile_screen.dart`) | the buyer's Account tab, and the Account tab of **both** provider dashboards (`embedded: true`, `padding: EdgeInsets.zero`) | `authProvider` → `profiles.full_name/phone/email/status` and the role list; `PointsService.getMyPoints()` → `user_points.points` filtered by `subject_type`/`subject_id`; `RankService.progressForPoints()`; `cityProvider.updateSavedCity()` → `profiles.city`; `VerificationStatusTile` → `ProviderDocGate.reviewState` → `user_documents` |
+| A category's glyph | `categoryIconForSector()` (`lib/core/utils/category_icons.dart`) | `_rankedCategoryChip` on Home and every row of `UserCategoryGroupScreen` | `categories.marketplace_sector` (FOOD / RETAIL / ACCOMMODATION / SERVICES / TRANSPORT); `Icons.category_outlined` for null or unknown, never a guess from the name |
+| Which big card a category belongs to | `CategoryGroup.membersOf()` (`lib/features/user/user_category_group_screen.dart`) | the three cards on Home **and** the screen each card opens | `categories.id/parent_id` (`parent_id IS NULL`), `.sector`, `.marketplace_sector`, `.sort_order`, `.is_active` |
+
+The `embedded` flag is the whole contract for the shared account: the buyer's
+tab owns its app bar and its scroll view, and a provider dashboard's tab is
+already inside one, so the dashboard renders as a plain column there. The
+widget owns the account; the host owns the frame. Adding a fourth account
+surface means adding a caller of `AccountDashboard`, not a fourth copy.
+
+**A ranking that is displayed must be re-derived for the level it names.**
+`ranked_categories` ranks every active category by **completed work in the
+last 7 days** — completed order lines for its listings (`order_items` joined
+to `orders` and `products`, read from `orders.updated_at`) plus completed
+rides booked against it (`ride_requests.vehicle_category_id`,
+`ride_requests.updated_at`) —
+then career totals, then name and id (so the order is total). Home used to
+print that list verbatim, which named the same three mother categories the
+cards above it already named.
+`subcategoryRailOrder()` turns the ranking plus `categories.id/parent_id` into
+the leaf rail above Fresh Finds: one leaf per mother per round, in the
+mothers' ranked order, because a listing is filed against the category its
+provider picked (usually the mother) and every leaf's own week count is
+therefore zero. The tiebreak cannot save it — it sorts by name, so a "top
+this week" rail built on the leaf counts alone is alphabetical. Tested
+directly in `test/home_subcategory_rail_test.dart`; the rule is invisible on
+screen when it is right and looks plausible when it is wrong.
+
 **A restated function must be a superset of the one it replaces.** Four
 migrations in this session re-issued `admin_registration_history`,
 `staff_task_feed`, `verify_payment_proof` and the five provider lifecycle
@@ -540,11 +574,13 @@ until someone pulls to refresh.
 *Fix:* move `staff_dashboard` onto `ResilientFeed`; needs a device to verify.
 
 ### 5.2 `AsyncView` is still barely adopted — **medium**
-The widget exists and is correct, and three screens now use it
-(`user_home_screen`, `user_orders_screen`, `user_notifications_screen`). The
-rest hand-roll `LoadErrorView` + `RetryWidget` — `LoadErrorView` is referenced
-by 33 files, including `async_view.dart` itself. The behaviour is mostly
-right, so this is consistency, not breakage.
+The widget exists and is correct, and two screens use it (`user_orders_screen`,
+`user_notifications_screen`). Home no longer does: it needs a first-frame
+skeleton and a keep-content-on-failed-refresh strip of its own, so it
+implements the same rule directly (`_buildSkeleton`, `_StaleBanner`). The rest
+hand-roll `LoadErrorView` + `RetryWidget` — `LoadErrorView` is referenced by 33
+files, including `async_view.dart` itself. The behaviour is mostly right, so
+this is consistency, not breakage.
 *Fix:* per-screen swap, mechanical.
 
 ### 5.3 Vehicles cannot have images — **fixed, migration 97**
@@ -2567,6 +2603,106 @@ party notified **zero** times, a repeated key producing one notice, a second
 document producing a second notice, each of the three verdicts reaching the
 person, and a non-reviewer refused the count with `ADMIN_ONLY`.
 
+### 7.1.14 The first screen was navigation, and half the app had a different Account tab
+
+Two reports, and both were "the thing exists, and the surface does not show
+it" — the same shape as §7.1.13, in the two places every user passes through
+first.
+
+#### Home spent its first screen on navigation
+
+The three big category cards were 120dp each, the trending providers were a
+horizontal rail of 110-wide tiles (two and a half visible, no cue that more
+existed) inside a fixed 200dp band, and "Top categories this week" printed
+the ranking verbatim. All three were navigation, and two of them duplicated
+what the page already said: the chip rail named the same three mother
+categories as the cards above it, and it sat between the provider photos and
+the feed instead of beside the thing it describes.
+
+What is there now, and the number that makes it hold:
+
+- **60dp is a minimum, not a height.** `_MainCategoryCard` uses
+  `BoxConstraints(minHeight: 60)`, a 34dp icon and 13.5/10.5 type. A fixed 60
+  would paint a bottom-overflow stripe at a large accessibility text scale;
+  the row grows instead.
+- **Four photos across, exactly.** `_gallerySection` is a `LayoutBuilder`
+  computing `(maxWidth - 16*2 - 8*3) / 4`, so the same four tiles read on the
+  narrowest phone and on a tablet. The label sits under the photo with the
+  verified badge, and the name row is under the image rather than over it, so
+  a dark photo cannot swallow the one fact the tile exists to state.
+- **The rail moved and changed level.** It is directly above Fresh Finds and
+  names the SMALL categories, not the mothers. `ranked_categories` cannot
+  order the leaves (see §4), so `subcategoryRailOrder()` does it from the
+  `ranked_categories` rows (`category_id`, `name`, `marketplace_sector`) and
+  one bounded `categories(id, parent_id)` read (`limit 1000`) for every active
+  leaf. The cap is 12, and an empty ranking or a failed tree read hides the
+  rail rather than rendering an empty strip.
+
+#### The data path, end to end
+
+| Surface | Function / RPC | Table / columns | Leads to |
+|---|---|---|---|
+| three big cards | `CategoryGroup.membersOf()` | `categories`: `parent_id IS NULL`, `sector`, `marketplace_sector`, `sort_order`, `is_active` | `/user/category-group/:group` |
+| the three card subtitles / group screen | same `CategoryGroup` rule | same row, counted by one `categories(parent_id)` read (`limit 500`) | `/user/category/:id` |
+| "Top categories this week" | `ranked_categories(p_limit, p_offset)` → `subcategoryRailOrder()` | its `RETURNS TABLE` (`category_id`, `name`, `slug`, `marketplace_sector`, `provider_count`, `completed_transactions`, `rank_position`) + `categories(id, parent_id)` for leaves | `/user/category/:id` |
+| Trending providers | `ranked_providers` (this week, then career totals) + `provider_trust_stats` + `visible_gallery_for_city` for the feed below | `ranked_providers`: `id`, `business_name`, `city`, `price_range`, `completed_transactions`, `rank_position`, `photo_storage_path`; `provider_trust_stats` for the verified badge | `/user/provider/:id` |
+| a category page | `visible_products_for_city(p_city, p_category_id)`, `ranked_providers(p_category_id, p_limit)`, one `product_images` batch | products and provider rows above; `product_images.product_id`; bucket `provider-photos`; `ProductCard.listing` with `listingType` and `listingPriceLabel` from the listing's own row (BUY vs BOOK) | listing / provider |
+| every Account tab | `AccountDashboard` (one widget) | see the table in §4 | `/wallet`, `/appeals`, `/points`, `/account/password`, `/account/deletion`, `/terms-of-service`, `/about`, `/help`, `/user/favorites`, `/user/ride-active`, `/user/ride-history`, `/map`, `/become-partner` |
+
+`ranked_categories` itself was restated by `20261015000011` to lead with the
+7-day window; `assert_category_tree_and_rank_are_wired()` reads the function
+bodies back by name and fails the deploy if the window, the completion-time
+comparison, the `is_admin()` check in `admin_create_category`, or the
+mother-inherits-its-classification rule ever disappears. It runs at the end of
+that migration and is also worth calling directly after the first deploy:
+without it the rail still renders, still looks ranked, and never moves.
+
+#### The provider dashboards had a two-row Account stub
+
+A buyer reached `/user` → Account → `UserProfileScreen`, which rendered the
+full account dashboard. A service provider or vehicle provider reached their
+own dashboard's Account tab and got a `Column` with **Wallet** and **Profile**
+— two rows, two routes, and no appeals, no city, no Terms, no account
+deletion. The account existed; half the app could not see it.
+
+`AccountDashboard` is now the one definition, with the contract described in
+§4. The provider dashboards call it with `embedded: true` and
+`padding: EdgeInsets.zero` because their tab host already owns the scroll view
+and the app bar; their Business, Catalogue, Orders, Vehicles and Shop tabs are
+unchanged. The buyer's `UserProfileScreen` is now the same call with no
+arguments.
+
+The dashboard reads only what it renders: `authProvider` (profile name, phone,
+email, status; `isProvider` for the Become a Partner row), `PointsService`
+(`user_points`), `cityProvider.updateSavedCity()` (`profiles.city`), and —
+through the `VerificationStatusTile` it embeds — the caller's `user_documents`
+review state via `ProviderDocGate.reviewState`, which is the VERIFIED/REJECTED
+state rather than the generous "may work" `DocCheckStatus`. Every row is a
+`context.push` to a route that already existed — no new table, no new column
+and no new RPC were added for this pass.
+
+#### The category screens now share the home's type and rules
+
+The buyer category screen was rebuilt on the same section style as Home
+(`_sectionTitle`) and its provider rows now carry the four facts the other two
+provider lists already read from the same `ranked_providers` row — photo
+(`photo_storage_path`, bucket `provider-photos`), `price_range`,
+`completed_transactions`, `rank_position` — so the same business cannot be
+described differently on Home, in "All providers" and here. The group screen's
+rows use `categoryIconForSector()` instead of one generic glyph for every row;
+that is the same function the home rail's chips use, and it is the whole
+reason the rule lives in `lib/core/utils/category_icons.dart` rather than in
+either screen.
+
+#### Verification
+
+`flutter analyze --no-pub`: 0 errors, issues at the pre-change baseline.
+`flutter test`: 479 passed, including `test/home_subcategory_rail_test.dart`
+(ordering, mixing, unknown mothers, cap, empty, and no-repeat-past-the-cap).
+`tools/harness/run_all.sh`: 71 checks, exit 0. The layout itself was verified
+by static analysis and tests only — this workspace has no emulator, so no
+screenshot was rendered.
+
 ### 7.2 Edge Functions
 
 Deployed by the `Deploy function …` steps in `.github/workflows/deploy-supabase.yml`.
@@ -2665,7 +2801,12 @@ the dashboard survives a deploy.
    beginning `ok:` that prints every fee figure — a `FAIL:` prefix means the
    ledger's arithmetic is impossible or a recharge withheld money without
    recording it as a fee.
-12. **Update `supabase/DEPLOYED_HEAD`** to the last migration the log reported as
+12. `select public.assert_category_tree_and_rank_are_wired();` returns `true`
+    (or a string naming the regression). Run it once after the first deploy of
+    `20261015000011`: it is the only check that reads the *body* of
+    `ranked_categories`, so it is what notices a restatement that quietly
+    reverts the rail to career totals.
+13. **Update `supabase/DEPLOYED_HEAD`** to the last migration the log reported as
     `Applying migration <name>`, and commit it. This file is the only thing in the
     repository that knows which migrations the live database has, and it is what
     makes `sh build/run_all.sh` check the right window (§7.1.1). Skipping it does
