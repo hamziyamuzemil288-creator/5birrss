@@ -13,6 +13,7 @@ import '../../core/services/posting_gate.dart';
 import '../../core/services/ride_service.dart';
 import '../../core/services/product_like_service.dart';
 import '../../core/theme/app_theme.dart';
+import '../../core/utils/category_icons.dart';
 import '../../core/widgets/cart_icon_button.dart';
 import '../../core/widgets/product_buy_button.dart';
 import '../../core/widgets/product_card.dart';
@@ -29,7 +30,9 @@ import 'user_category_group_screen.dart';
 ///   [ Transport & Rides ]
 ///   [ Shops & Products  ]
 ///   [ Services & Booking]
-///   Trending providers  (image, name + verified badge below the card)
+///   Trending providers  (4 photos across, name + badge below each)
+///   [ ride in progress ]  (only while the buyer has an active ride)
+///   Top categories this week  (small categories, as a chip rail)
 ///   Fresh Finds         (product grid)
 /// ```
 ///
@@ -75,10 +78,15 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
   /// Who carries the verified badge beside their name on the rail.
   Set<String> _verifiedProviders = const {};
 
-  /// The top categories of the last 7 days, from `ranked_categories`. Rendered
-  /// as the chip rail under the three big cards: the ordering is completed
-  /// work this week (20261015000011), so it is the same "what is happening
-  /// now" answer the Trending provider rail gives, one level down.
+  /// The top SMALL categories of the last 7 days, from `ranked_categories`.
+  /// Rendered as the chip rail directly above Fresh Finds: the ordering is
+  /// completed work this week (20261015000011), so it is the same "what is
+  /// happening now" answer the Trending provider rail gives, one level down.
+  ///
+  /// These are the leaves — Restaurants, Electronics, Construction — not the
+  /// three big cards above. A chip naming "Shops & Products" repeated the big
+  /// card the buyer had already scrolled past; a chip naming the small
+  /// category they can actually shop is one tap to listings they can buy.
   ///
   /// Empty means no rail at all rather than an empty strip: a failed ranking
   /// is not a fact about the marketplace.
@@ -324,6 +332,11 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
     final imageMaps = await _resolveProviderImages(providers);
     final verified = await _resolveVerifiedProviders(providers);
 
+    // 6. The chips above Fresh Finds. The SMALL categories, not the ranking
+    //    verbatim -- see [_subcategoryRail] for why the leaves need the
+    //    parents' order to be ranked at all.
+    final rail = await _subcategoryRail(client, ranked);
+
     return {
       'categories': categories,
       'products': _toProducts(prodData as List),
@@ -331,12 +344,61 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
       'providers': providers,
       'providerImages': imageMaps,
       'verified': verified,
-      // The weekly ranking, capped to the rail. The full list already sorted
-      // the categories above; this is the same answer, sliced for the chips.
-      'ranked': ranked.take(12).toList(),
+      // The weekly ranking, narrowed to small categories and capped to the
+      // rail. The full list already sorted the mother categories above.
+      'ranked': rail,
       'gallery': gallery,
       'galleryPrices': galleryPrices,
     };
+  }
+
+  /// The chips above Fresh Finds: the SMALL categories, ordered by this week.
+  ///
+  /// `ranked_categories` ranks every active category — the three mother
+  /// categories and their leaves — by completed work in the last 7 days. A
+  /// rail that printed that ranking verbatim repeated the three big cards the
+  /// buyer had just scrolled past, and answered "what are the biggest
+  /// categories" when the question is "what is being bought this week".
+  /// Restaurants, Electronics, Construction are the answer; a chip has to
+  /// open something the buyer can shop.
+  ///
+  /// The ranking itself cannot order the leaves: a listing is filed against
+  /// the category its provider picked, which is usually the mother, so every
+  /// leaf's own week count is zero and the tiebreak (name) would turn the
+  /// rail into an alphabetical list. The leaves are therefore taken parent by
+  /// parent in the parents' ranked order, one leaf per parent per round: the
+  /// first chip is the busiest trade's first specialty, the second chip is the
+  /// next trade's, and the rail stays as mixed as the marketplace is.
+  ///
+  /// Best-effort throughout. A failed read of the tree returns no chips, and
+  /// the section hides itself — an empty strip is not a fact about trading.
+  Future<List<Map<String, dynamic>>> _subcategoryRail(
+    SupabaseClient client,
+    List<Map<String, dynamic>> ranked,
+  ) async {
+    if (ranked.isEmpty) return const [];
+    // id -> mother id for every active small category. Without this the rail
+    // would name the mothers again, so a failure hides the rail rather than
+    // falling back to the wrong set.
+    final motherOf = <String, String>{};
+    try {
+      final rows = await client
+          .from('categories')
+          .select('id, parent_id')
+          .eq('is_active', true)
+          .not('parent_id', 'is', null)
+          .limit(1000);
+      for (final raw in rows as List) {
+        final row = Map<String, dynamic>.from(raw as Map);
+        final id = row['id'];
+        final parent = row['parent_id'];
+        if (id is String && parent is String) motherOf[id] = parent;
+      }
+    } catch (_) {
+      return const [];
+    }
+    if (motherOf.isEmpty) return const [];
+    return subcategoryRailOrder(ranked, motherOf);
   }
 
   /// The published price range of every provider behind the mixed-in gallery
@@ -628,8 +690,12 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
     //
     //   header (city, + Post product, notifications, search, cart)
     //   Book a ride | All providers  — side by side, one height
-    //   the 3 big categories
-    //   trending providers
+    //   the 3 big categories — compact rows, half their old height
+    //   trending providers — four photos across, no horizontal scrolling
+    //   [ ride in progress ]
+    //   Top categories this week — the SMALL categories, above Fresh Finds so
+    //                              the buyer reaches them right where they are
+    //                              about to browse listings
     //   Fresh Finds
     //
     // The tab row and the 3-up category grid that used to live between the
@@ -649,10 +715,10 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
                   message: _error!, onRetry: _load),
             ),
           SliverToBoxAdapter(child: _categorySection()),
-          SliverToBoxAdapter(child: _rankedCategoryRail()),
           SliverToBoxAdapter(child: _gallerySection()),
           if (_activeRide != null)
             SliverToBoxAdapter(child: _rideBanner(_activeRide!)),
+          SliverToBoxAdapter(child: _rankedCategoryRail()),
           ..._productRail(),
           const SliverToBoxAdapter(child: SizedBox(height: 28)),
         ],
@@ -777,40 +843,63 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
             ),
           ),
         ),
-        SizedBox(
-          // Image-first, with the name (and its verified badge) underneath
-          // rather than on it — plus the BOOK row every other card carries. The
-          // height is the tile's own height: image 104 + name + one wrapped
-          // subtitle line + the compact button, with slack for a larger font
-          // scale rather than a BOTTOM OVERFLOWED stripe.
-          height: 200,
-          child: ListView.separated(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            itemCount: _galleryProviders.length,
-            separatorBuilder: (_, __) => const SizedBox(width: 10),
-            itemBuilder: (_, i) {
-              final p = _galleryProviders[i];
-              return _galleryTile(
-                id: (p['id'] ?? '') as String,
-                name: ((p['business_name'] as String?) ?? '').trim(),
-                city: ((p['city'] as String?) ?? '').trim(),
-                imageUrl: _providerImages[(p['id'] ?? '') as String],
-                verified: _verifiedProviders.contains((p['id'] ?? '') as String),
-                photoPath: p['photo_storage_path'] as String?,
-                photoCount: counts[(p['id'] ?? '') as String] ?? 0,
-                transactions:
-                    (p['completed_transactions'] as num?)?.toInt() ?? 0,
-                priceRange: ((p['price_range'] as String?) ?? '').trim(),
-              );
-            },
-          ),
+        // Four photos across, exactly. The width is the space left after the
+        // page's 16px gutters and the three gaps between the tiles, divided by
+        // four — so four are readable on the narrowest phone and the row
+        // still reads on a tablet instead of growing into a different layout.
+        //
+        // It used to be a horizontal rail of 110-wide tiles: two and a half
+        // visible, the rest off-screen with no cue that they existed, and a
+        // fixed 200px band for it. Four across answers "who is nearby"
+        // without a gesture nobody performs.
+        LayoutBuilder(
+          builder: (context, constraints) {
+            const gutter = 16.0;
+            const gap = 8.0;
+            final width = (constraints.maxWidth - gutter * 2 - gap * 3) / 4;
+            if (width <= 0) return const SizedBox.shrink();
+            final shown = _galleryProviders.take(4).toList();
+            return Padding(
+              padding: const EdgeInsets.symmetric(horizontal: gutter),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (var i = 0; i < shown.length; i++) ...[
+                    if (i > 0) const SizedBox(width: gap),
+                    SizedBox(
+                      width: width,
+                      child: _galleryTile(
+                        width: width,
+                        id: (shown[i]['id'] ?? '') as String,
+                        name:
+                            ((shown[i]['business_name'] as String?) ?? '').trim(),
+                        city: ((shown[i]['city'] as String?) ?? '').trim(),
+                        imageUrl: _providerImages[(shown[i]['id'] ?? '') as String],
+                        verified: _verifiedProviders
+                            .contains((shown[i]['id'] ?? '') as String),
+                        photoPath: shown[i]['photo_storage_path'] as String?,
+                        photoCount:
+                            counts[(shown[i]['id'] ?? '') as String] ?? 0,
+                        transactions:
+                            (shown[i]['completed_transactions'] as num?)
+                                    ?.toInt() ??
+                                0,
+                        priceRange:
+                            ((shown[i]['price_range'] as String?) ?? '').trim(),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            );
+          },
         ),
       ],
     );
   }
 
   Widget _galleryTile({
+    required double width,
     required String id,
     required String name,
     required String city,
@@ -850,11 +939,11 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
     // job/photo count is context for it.
     final subtitle = priceRange.isEmpty ? base : '$priceRange · $base';
 
-    // At least 50% smaller than the old 152x196 tile: ~110x104.
-    // The image is the card background (cover fit, rounded), with the
-    // name under the card and a verified badge next to it.
+    // The image is the card (cover fit, rounded, square), with the name under
+    // it and a verified badge next to it. The caller decides the width: four
+    // of these have to fit the screen.
     return SizedBox(
-      width: 110,
+      width: width,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -865,8 +954,8 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
             child: ClipRRect(
               borderRadius: BorderRadius.circular(12),
               child: SizedBox(
-                width: 110,
-                height: 104,
+                width: width,
+                height: width,
                 child: url == null
                     ? _providerFallback(name)
                     : Image.network(
@@ -925,12 +1014,17 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
           // The same purchase entry point every other card carries: a provider
           // photo's buyer action is to see and book their work, so this goes
           // through the shared button rather than a second hand-rolled tap
-          // target. It is what stops this rail being the one surface where a
-          // card shows a price with nothing to do about it.
-          ProductBuyButton(
-            providerId: id,
-            label: 'Book',
-            compact: true,
+          // target. It has no listing to add, so the button opens the provider
+          // — the same place the photo goes. Scaled down rather than fixed:
+          // four across leaves ~76px per tile, and a long label at a large text
+          // scale must shrink, not overflow its card.
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            child: ProductBuyButton(
+              providerId: id,
+              label: 'Book',
+              compact: true,
+            ),
           ),
         ],
       ),
@@ -1075,9 +1169,8 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
   /// screen, where every sub-category it owns is listed and searchable.
   Widget _categorySection() {
     // Quick actions: Book a ride + All providers, equal width, same height.
-    final screenWidth = MediaQuery.sizeOf(context).width;
-    final halfWidth = (screenWidth - 16 - 12) / 2; // 16 padding, 12 gap
-
+    // The two `Expanded`s in the row below do the sizing; a screen-width
+    // calculation used to be passed into each card and read by nothing.
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1093,7 +1186,6 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
                   subtitle: 'Request a driver',
                   tint: AppTheme.primaryGreen,
                   onTap: () => context.push('/user/ride-request'),
-                  width: halfWidth,
                 ),
               ),
               const SizedBox(width: 12),
@@ -1104,7 +1196,6 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
                   subtitle: 'Browse every business',
                   tint: AppTheme.teal,
                   onTap: _openAllProviders,
-                  width: halfWidth,
                 ),
               ),
             ],
@@ -1119,11 +1210,9 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
               Expanded(
                 child: _MainCategoryCard(
                   title: 'Transport & Rides',
-                  subtitle: _groupedCount(_transportCategories).toString(),
+                  subtitle: _groupedSubtitle(_transportCategories),
                   icon: Icons.directions_car_outlined,
                   tint: AppTheme.primaryGreen,
-                  count: _transportCategories.length,
-                  childCategories: _transportCategories,
                   onTap: _transportCategories.isNotEmpty
                       ? () => _openCategoryGroup('transport')
                       : null,
@@ -1140,11 +1229,9 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
               Expanded(
                 child: _MainCategoryCard(
                   title: 'Shops & Products',
-                  subtitle: _groupedCount(_shopCategories).toString(),
+                  subtitle: _groupedSubtitle(_shopCategories),
                   icon: Icons.storefront_outlined,
                   tint: AppTheme.gold,
-                  count: _shopCategories.length,
-                  childCategories: _shopCategories,
                   onTap: _shopCategories.isNotEmpty
                       ? () => _openCategoryGroup('shops')
                       : null,
@@ -1161,11 +1248,9 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
               Expanded(
                 child: _MainCategoryCard(
                   title: 'Services & Booking',
-                  subtitle: _groupedCount(_serviceCategories).toString(),
+                  subtitle: _groupedSubtitle(_serviceCategories),
                   icon: Icons.book_online_outlined,
                   tint: AppTheme.teal,
-                  count: _serviceCategories.length,
-                  childCategories: _serviceCategories,
                   onTap: _serviceCategories.isNotEmpty
                       ? () => _openCategoryGroup('services')
                       : null,
@@ -1181,8 +1266,8 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
 
   // ------------------------------------------------- top categories, this week
 
-  /// The chip rail under the three big cards: the categories the last 7 days
-  /// actually traded in, most first.
+  /// The chip rail just above Fresh Finds: the SMALL categories the last 7
+  /// days actually traded in, most first.
   ///
   /// This is where the ranking's window becomes visible. `ranked_categories`
   /// used to order by career totals, which is an ordering that never changes —
@@ -1192,10 +1277,10 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
   /// surface that shows it: a category with a busy week moves up, and one with
   /// nothing this week drops off even though its lifetime total is larger.
   ///
-  /// Every chip is NAVIGATION, not decoration: it opens the category's own
-  /// screen (/user/category/:id), which lists that category's providers and
-  /// sub-categories. An empty ranking renders no rail at all — a failed read
-  /// is not a fact about the marketplace, and a strip of nothing says it is.
+  /// Every chip is NAVIGATION, not decoration: it opens the small category's
+  /// own screen (/user/category/:id), which lists its providers and listings.
+  /// An empty ranking renders no rail at all — a failed read is not a fact
+  /// about the marketplace, and a strip of nothing says it is.
   Widget _rankedCategoryRail() {
     final rows = _rankedCategories;
     if (rows.isEmpty) return const SizedBox.shrink();
@@ -1203,7 +1288,7 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Padding(
-          padding: EdgeInsets.fromLTRB(20, 18, 20, 2),
+          padding: EdgeInsets.fromLTRB(20, 22, 20, 2),
           child: Text(
             'Top categories this week',
             style: TextStyle(
@@ -1251,7 +1336,7 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(
-              _rankedCategoryIcon((row['marketplace_sector'] as String?) ?? ''),
+              categoryIconForSector(row['marketplace_sector'] as String?),
               size: 15,
               color: AppTheme.primaryGreen,
             ),
@@ -1273,26 +1358,6 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
     );
   }
 
-  /// One icon per marketplace sector. Falls back to the generic category glyph
-  /// rather than guessing from the name: a wrong icon reads as a different
-  /// trade, and no icon reads as "no opinion".
-  IconData _rankedCategoryIcon(String sector) {
-    switch (sector) {
-      case 'FOOD':
-        return Icons.restaurant_outlined;
-      case 'RETAIL':
-        return Icons.storefront_outlined;
-      case 'ACCOMMODATION':
-        return Icons.hotel_outlined;
-      case 'SERVICES':
-        return Icons.design_services_outlined;
-      case 'TRANSPORT':
-        return Icons.directions_car_outlined;
-      default:
-        return Icons.category_outlined;
-    }
-  }
-
   /// Groups of categories mapped into the 3 big sections.
   ///
   /// Delegated to [CategoryGroup] rather than re-filtered here: the card's
@@ -1308,7 +1373,17 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
   List<AppCategory> get _serviceCategories =>
       CategoryGroup.services.membersOf(_categories);
 
-  int _groupedCount(List<AppCategory> list) => list.length;
+  /// What a big card says under its title: how many sub-categories are behind
+  /// it, in words.
+  ///
+  /// It used to print the raw number as the subtitle AND the same number again
+  /// in a chip beside it, so a card read "7" over "7 categories" — the
+  /// number-only tile that the screen it opens was built to replace. The
+  /// subtitle now carries the whole fact, so there is exactly one place the
+  /// count is stated.
+  String _groupedSubtitle(List<AppCategory> list) => list.isEmpty
+      ? 'Nothing listed yet'
+      : '${list.length} sub-categor${list.length == 1 ? 'y' : 'ies'}';
 
   /// A big category card opens its own screen: every sub-category of that
   /// group, searchable, and nothing from any other group. The screen loads
@@ -1545,7 +1620,10 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
                   child: ShimmerEffect(
                     child: SkeletonBox(
                       width: double.infinity,
-                      height: 108,
+                      // 60, the compact card's own height: a placeholder of
+                      // a different size makes the whole page jump when the
+                      // data lands.
+                      height: 60,
                       borderRadius: 16,
                     ),
                   ),
@@ -1608,7 +1686,6 @@ class _QuickActionCard extends StatelessWidget {
     required this.subtitle,
     required this.tint,
     required this.onTap,
-    required this.width,
   });
 
   final IconData icon;
@@ -1616,7 +1693,6 @@ class _QuickActionCard extends StatelessWidget {
   final String subtitle;
   final Color tint;
   final VoidCallback onTap;
-  final double width;
 
   @override
   Widget build(BuildContext context) {
@@ -1673,16 +1749,15 @@ class _QuickActionCard extends StatelessWidget {
   }
 }
 
-/// A big main category card: large, clean, with icon, title, count, and a
-/// subtle background tint. Tapping opens the group's sub-categories.
+/// A big main category card: large, clean, with icon, title, the count in
+/// words, and a subtle background tint. Tapping opens the group's
+/// sub-categories.
 class _MainCategoryCard extends StatelessWidget {
     const _MainCategoryCard({
     required this.title,
     required this.subtitle,
     required this.icon,
     required this.tint,
-    required this.count,
-    required this.childCategories,
     required this.onTap,
   });
 
@@ -1690,13 +1765,10 @@ class _MainCategoryCard extends StatelessWidget {
   final String subtitle;
   final IconData icon;
   final Color tint;
-  final int count;
-  final List<AppCategory> childCategories;
   final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
-    final hasChildren = childCategories.isNotEmpty;
     return Material(
       color: AppTheme.surface,
       borderRadius: BorderRadius.circular(16),
@@ -1704,8 +1776,17 @@ class _MainCategoryCard extends StatelessWidget {
         onTap: onTap,
         borderRadius: BorderRadius.circular(16),
         child: Container(
-          height: 120,
-          padding: const EdgeInsets.all(16),
+          // Half the old 120. The three cards are navigation, not content:
+          // they sat a full 120 + 120 + 120 + gaps between the quick actions
+          // and the photos, which is most of the first screen spent on three
+          // rows whose whole job is to be tapped and left.
+          //
+          // A MINIMUM, not a height: at a large accessibility text scale the
+          // two lines need more than the compact row allows, and a fixed 60
+          // would paint a BOTTOM OVERFLOWED stripe on the app's first screen.
+          // The row grows instead of breaking.
+          constraints: const BoxConstraints(minHeight: 60),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(16),
             border: Border.all(color: AppTheme.cardBorder, width: 0.5),
@@ -1720,63 +1801,43 @@ class _MainCategoryCard extends StatelessWidget {
           ),
           child: Row(
             children: [
-              // Left: icon block
+              // Left: icon block, sized to the new row height rather than to
+              // the old card.
               Container(
-                width: 56,
-                height: 56,
+                width: 34,
+                height: 34,
                 decoration: BoxDecoration(
                   color: tint.withOpacity(0.10),
-                  borderRadius: BorderRadius.circular(14),
+                  borderRadius: BorderRadius.circular(9),
                 ),
-                child: Icon(icon, color: tint, size: 28),
+                child: Icon(icon, color: tint, size: 19),
               ),
-              const SizedBox(width: 14),
+              const SizedBox(width: 10),
               // Right: text
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                  Text(                    title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w700,
-                      color: AppTheme.textPrimary,
-
+                    Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w700,
+                        color: AppTheme.textPrimary,
                       ),
                     ),
-                    const SizedBox(height: 2),
-                    Row(
-                      children: [
-                        Text(
-                          subtitle,
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: AppTheme.textMuted,
-                          ),
-                        ),
-                        if (hasChildren) ...[
-                          const SizedBox(width: 6),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 6, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: tint.withOpacity(0.12),
-                              borderRadius: BorderRadius.circular(10),
-                            ),
-                            child: Text(
-                              '$count categories',
-                              style: TextStyle(
-                                fontSize: 10.5,
-                                fontWeight: FontWeight.w600,
-                                color: tint,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ],
+                    const SizedBox(height: 1),
+                    Text(
+                      subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 10.5,
+                        color: AppTheme.textMuted,
+                      ),
                     ),
                   ],
                 ),
@@ -1785,7 +1846,7 @@ class _MainCategoryCard extends StatelessWidget {
               Icon(
                 Icons.keyboard_arrow_right,
                 color: tint.withOpacity(0.6),
-                size: 22,
+                size: 18,
               ),
             ],
           ),
@@ -1793,7 +1854,59 @@ class _MainCategoryCard extends StatelessWidget {
       ),
     );
   }
-}// ============================================================== small views
+}
+
+/// The small categories for the rail above Fresh Finds, in the order they are
+/// shown.
+///
+/// Split out of the screen so the ordering can be tested without a database:
+/// it is the one rule here that a reader cannot check by looking at the UI,
+/// and getting it wrong quietly turns "top this week" into "alphabetical".
+///
+/// [ranked] is `ranked_categories` in rank order (mothers and leaves mixed),
+/// and [motherOf] maps each leaf id to its mother's id. Since a listing is
+/// filed against the category its provider picked — usually the mother — a
+/// leaf's own week count is almost always zero, so the leaves are taken one
+/// per mother per round in the MOTHERS' ranked order: the busiest trade's
+/// first specialty, then the next trade's, and so on. A leaf with no known
+/// mother is dropped rather than promoted to the top of the rail.
+List<Map<String, dynamic>> subcategoryRailOrder(
+  List<Map<String, dynamic>> ranked,
+  Map<String, String> motherOf, {
+  int maxChips = 12,
+}) {
+  if (ranked.isEmpty || motherOf.isEmpty || maxChips <= 0) return const [];
+
+  // A row's index IS its rank, because the query already ordered them.
+  final rankOf = <String, int>{};
+  final leavesOf = <String, List<Map<String, dynamic>>>{};
+  for (var i = 0; i < ranked.length; i++) {
+    final id = ranked[i]['category_id'];
+    if (id is! String) continue;
+    rankOf[id] = i;
+    final mother = motherOf[id];
+    if (mother == null) continue;
+    leavesOf.putIfAbsent(mother, () => []).add(ranked[i]);
+  }
+  final mothers = leavesOf.keys.toList()
+    ..sort((a, b) => (rankOf[a] ?? 1 << 30).compareTo(rankOf[b] ?? 1 << 30));
+
+  final rail = <Map<String, dynamic>>[];
+  for (var round = 0; rail.length < maxChips; round++) {
+    var addedThisRound = 0;
+    for (final mother in mothers) {
+      final leaves = leavesOf[mother]!;
+      if (round >= leaves.length) continue;
+      rail.add(leaves[round]);
+      addedThisRound++;
+      if (rail.length == maxChips) break;
+    }
+    if (addedThisRound == 0) break;
+  }
+  return rail;
+}
+
+// ============================================================== small views
 
 /// "+ Post product", beside the city selector in the header.
 ///

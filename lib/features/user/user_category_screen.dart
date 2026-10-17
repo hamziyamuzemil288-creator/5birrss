@@ -11,6 +11,29 @@ import '../../core/widgets/load_error_view.dart';
 import '../../core/widgets/product_card.dart';
 import '../../core/widgets/subcategory_chip.dart';
 
+/// One category, as a buyer meets it: its sub-categories, the providers who
+/// work in it, and its listings.
+///
+/// ## Where this screen sits in the buyer's path
+///
+/// Home's three big cards open the group screen
+/// (`/user/category-group/:group`), and every row there opens this screen.
+/// Both steps are `push`, so the path a buyer walked stays behind them and
+/// Back returns to the screen they came from. This screen's sub-category chips
+/// used to call `go`, which rebuilds the stack from the top-level route — the
+/// parent category and its group were discarded, and Back left the category
+/// tree altogether. Same-level navigation now behaves the same way everywhere:
+/// one level down is a push, and nothing silently replaces the history.
+///
+/// ## What every section is drawn with
+///
+/// The section headings use the home screen's type scale, the sub-category
+/// chips are the shared [SubcategoryChip], and the listings are the shared
+/// [ProductCard] — the same card the home feed, search results and a
+/// provider's page render, including the BUY/BOOK action decided by the
+/// listing's own type. The provider rows carry the provider's photo, their
+/// published price range and their completed work, which are the facts the
+/// home rail's tiles already show for the same people.
 class UserCategoryScreen extends StatefulWidget {
   final String categoryId;
   const UserCategoryScreen({super.key, required this.categoryId});
@@ -151,69 +174,36 @@ class _UserCategoryScreenState extends State<UserCategoryScreen> {
               ? LoadErrorView(message: _error!, onRetry: _load)
               : RefreshIndicator(
                   onRefresh: _load,
+                  color: AppTheme.primaryGreen,
                   child: ListView(
-                    padding: const EdgeInsets.all(16),
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
                     children: [
-                      // Subcategories
+                      // Sub-categories. Each chip PUSHES the category it names
+                      // rather than replacing this screen: the buyer keeps the
+                      // path they walked, and Back returns to the parent.
                       if (_subcategories.isNotEmpty) ...[
-                        const Text('Subcategories',
-                            style: TextStyle(
-                                fontSize: 15, fontWeight: FontWeight.w600)),
+                        _sectionTitle('Subcategories'),
                         const SizedBox(height: 8),
                         Wrap(
                           spacing: 8,
                           runSpacing: 8,
                           children: _subcategories
                               .map((s) => SubcategoryChip(
-                                    label: s['name'] ?? '',
-                                    onTap: () =>
-                                        context.go('/user/category/${s['id']}'),
+                                    label: (s['name'] ?? '').toString(),
+                                    onTap: () => context
+                                        .push('/user/category/${s['id']}'),
                                   ))
                               .toList(),
                         ),
+                        const SizedBox(height: 20),
                       ],
-                      const SizedBox(height: 20),
                       // The people, ranked by completed work.
                       if (_providers.isNotEmpty) ...[
-                        const Text('Top providers',
-                            style: TextStyle(
-                                fontSize: 15, fontWeight: FontWeight.w600)),
+                        _sectionTitle('Top providers'),
                         const SizedBox(height: 8),
-                        ..._providers.map((p) {
-                          final jobs =
-                              (p['completed_transactions'] as num?)?.toInt() ?? 0;
-                          return ListTile(
-                            contentPadding: EdgeInsets.zero,
-                            onTap: () =>
-                                context.push('/user/provider/${p['id']}'),
-                            leading: CircleAvatar(
-                              backgroundColor: AppTheme.primaryGreen,
-                              child: Text(
-                                '#${p['rank_position']}',
-                                style: const TextStyle(
-                                    color: Colors.white, fontSize: 12),
-                              ),
-                            ),
-                            title: Text(p['business_name']?.toString() ?? ''),
-                            subtitle: Text(
-                              jobs > 0
-                                  ? '$jobs completed job${jobs == 1 ? '' : 's'}'
-                                  : ((p['city'] as String?) ?? ''),
-                              style: const TextStyle(
-                                  fontSize: 12,
-                                  color: AppTheme.textMuted),
-                            ),
-                            trailing: (p['price_range'] as String?)?.isNotEmpty ==
-                                    true
-                                ? Text(p['price_range'] as String,
-                                    style: const TextStyle(
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.w700,
-                                        color: AppTheme.primaryGreen))
-                                : null,
-                          );
-                        }),
-                        const SizedBox(height: 20),
+                        ..._providers.map(_providerRow),
+                        const SizedBox(height: 8),
                       ],
                       // Products — the SAME card the home feed uses.
                       //
@@ -225,17 +215,18 @@ class _UserCategoryScreenState extends State<UserCategoryScreen> {
                       // BUY button together, which is what makes that class of
                       // inconsistency impossible to reintroduce one screen at a
                       // time.
-                      Text('Products (${_products.length})',
-                          style: const TextStyle(
-                              fontSize: 15, fontWeight: FontWeight.w600)),
+                      _sectionTitle('Products (${_products.length})'),
                       const SizedBox(height: 8),
                       if (_products.isEmpty)
                         const Padding(
                           padding: EdgeInsets.all(30),
                           child: Center(
-                              child: Text('No products in this category',
-                                  style: TextStyle(
-                                      color: AppTheme.textMuted))))
+                            child: Text(
+                              'No products in this category yet',
+                              style: TextStyle(color: AppTheme.textMuted),
+                            ),
+                          ),
+                        )
                       else
                         GridView.builder(
                           shrinkWrap: true,
@@ -292,6 +283,162 @@ class _UserCategoryScreenState extends State<UserCategoryScreen> {
                     ],
                   ),
                 ),
+    );
+  }
+
+  /// A section heading on this screen.
+  ///
+  /// The same type scale and colour the buyer home's sections use, so a
+  /// category page reads as part of the same app instead of a list with
+  /// headings of its own.
+  Widget _sectionTitle(String text) => Text(
+        text,
+        style: const TextStyle(
+          fontSize: 16.5,
+          fontWeight: FontWeight.w700,
+          color: AppTheme.textPrimary,
+        ),
+      );
+
+  /// One ranked provider, as a row.
+  ///
+  /// The row always opened the provider's page; what it did not carry was the
+  /// provider's own photo, their published price range, or their place in the
+  /// ranking, so the same business was described differently here (rank badge,
+  /// no photo) and on the home rail and in the "All providers" sheet (photo,
+  /// price range, completed work). The facts are read off the same
+  /// `ranked_providers` row all three lists are built from, so they cannot
+  /// disagree about who is biggest.
+  Widget _providerRow(Map<String, dynamic> p) {
+    final id = (p['id'] ?? '').toString();
+    final name = ((p['business_name'] as String?) ?? '').trim();
+    final city = ((p['city'] as String?) ?? '').trim();
+    final range = ((p['price_range'] as String?) ?? '').trim();
+    final jobs = (p['completed_transactions'] as num?)?.toInt() ?? 0;
+    final rank = (p['rank_position'] as num?)?.toInt();
+    final path = ((p['photo_storage_path'] as String?) ?? '').trim();
+    // The provider's business photo, from the same bucket and the same column
+    // the home rail resolves its tiles from. A provider with no photo gets the
+    // placeholder rather than a broken image box.
+    final photoUrl = path.isEmpty
+        ? null
+        : Supabase.instance.client.storage
+            .from('provider-photos')
+            .getPublicUrl(path);
+    final facts = <String>[
+      if (jobs > 0) '$jobs completed job${jobs == 1 ? '' : 's'}',
+      if (range.isNotEmpty) range,
+      if (jobs == 0 && city.isNotEmpty) city,
+    ];
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Material(
+        color: AppTheme.surface,
+        borderRadius: BorderRadius.circular(14),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(14),
+          onTap: id.isEmpty ? null : () => context.push('/user/provider/$id'),
+          child: Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: AppTheme.cardBorder, width: 0.5),
+            ),
+            child: Row(
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(12),
+                  child: photoUrl == null
+                      ? const _ProviderPhotoPlaceholder()
+                      : Image.network(
+                          photoUrl,
+                          width: 44,
+                          height: 44,
+                          fit: BoxFit.cover,
+                          // Never stretch a cached frame while it re-decodes.
+                          gaplessPlayback: true,
+                          errorBuilder: (_, __, ___) =>
+                              const _ProviderPhotoPlaceholder(),
+                        ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              name.isEmpty ? 'Unnamed provider' : name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 14.5,
+                                fontWeight: FontWeight.w700,
+                                color: AppTheme.textPrimary,
+                              ),
+                            ),
+                          ),
+                          if (rank != null && rank > 0)
+                            Container(
+                              margin: const EdgeInsets.only(left: 8),
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 7, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: AppTheme.primaryGreen.withOpacity(0.12),
+                                borderRadius: BorderRadius.circular(9),
+                              ),
+                              child: Text(
+                                '#$rank',
+                                style: const TextStyle(
+                                  fontSize: 10.5,
+                                  fontWeight: FontWeight.w700,
+                                  color: AppTheme.primaryGreenDark,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        facts.isEmpty
+                            ? 'No completed jobs yet'
+                            : facts.join(' · '),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: AppTheme.textMuted,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const Icon(Icons.chevron_right_rounded,
+                    color: AppTheme.textMuted, size: 22),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The row's photo slot when a provider has published none.
+class _ProviderPhotoPlaceholder extends StatelessWidget {
+  const _ProviderPhotoPlaceholder();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 44,
+      height: 44,
+      color: AppTheme.creamDark,
+      child: const Icon(Icons.storefront_outlined,
+          size: 20, color: AppTheme.textMuted),
     );
   }
 }

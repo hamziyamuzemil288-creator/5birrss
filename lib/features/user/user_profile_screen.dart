@@ -176,11 +176,53 @@ class _ProfileAvatarState extends ConsumerState<ProfileAvatar> {
   }
 }
 
+/// The buyer's Account tab: the account dashboard, on its own page.
+///
+/// Nothing of the dashboard lives here any more — [AccountDashboard] does, so
+/// the provider and vehicle dashboards' Account tabs show the SAME screen
+/// instead of the two-row Wallet/Profile stub each of them had.
 class UserProfileScreen extends ConsumerWidget {
   const UserProfileScreen({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Profile')),
+      body: const AccountDashboard(),
+    );
+  }
+}
+
+/// The account dashboard: who you are, your points, and every account door.
+///
+/// ONE definition for every role. A buyer reached this as their Account tab;
+/// a provider reached a two-row stub (Wallet, Profile) inside their own
+/// dashboard — the same account, the same routes, two different screens, so
+/// the wallet, appeals, Terms and account deletion looked like they did not
+/// exist for half the app. [embedded] is the only difference: inside another
+/// dashboard's tab the host already owns the scroll view and the app bar, so
+/// the dashboard renders as a plain column there.
+class AccountDashboard extends ConsumerWidget {
+  const AccountDashboard({
+    super.key,
+    this.embedded = false,
+    this.padding = const EdgeInsets.all(20),
+  });
+
+  /// True when this is a tab inside another screen's scroll view.
+  final bool embedded;
+
+  /// Inset around the content. Zero when embedded: the host screen has
+  /// already inset its tab.
+  final EdgeInsets padding;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final body = Padding(padding: padding, child: _content(context, ref));
+    return embedded ? body : SingleChildScrollView(child: body);
+  }
+
+  Widget _content(BuildContext context, WidgetRef ref) {
     final auth = ref.watch(authProvider);
     final profile = auth.profile;
 
@@ -196,11 +238,7 @@ class UserProfileScreen extends ConsumerWidget {
     };
     final statusLabel = (status ?? 'ACTIVE').replaceAll('_', ' ').toLowerCase();
 
-    return Scaffold(
-      appBar: AppBar(title: const Text('Profile')),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(20),
-        child: Column(
+    return Column(
           children: [
             // Profile header card
             Container(
@@ -287,7 +325,19 @@ class UserProfileScreen extends ConsumerWidget {
                   _divider(),
                   _menuTile(Icons.location_city_outlined, 'My City',
                       AppTheme.teal, onTap: () => _changeCity(context, ref)),
-                  _divider(),                  // No address book exists yet. It says so on the tap rather
+                  _divider(),
+                  // The buyer's own wallet: balance, recharge requests and
+                  // transaction history. Both provider dashboards carry this
+                  // door and the buyer area carried none, so a customer with a
+                  // balance — a refund, a converted points balance, a recharge
+                  // they are waiting on — had no way to reach the one screen
+                  // that shows it. The route existed the whole time with
+                  // nothing in /user pointing at it.
+                  _menuTile(Icons.account_balance_wallet_outlined, 'My Wallet',
+                      AppTheme.primaryGreen,
+                      onTap: () => context.push('/wallet')),
+                  _divider(),
+                  // No address book exists yet. It says so on the tap rather
                   // than doing nothing, because a row that looks tappable and
                   // is not reads as a broken app.
                   _menuTile(Icons.location_on_outlined, 'Addresses',
@@ -385,9 +435,7 @@ class UserProfileScreen extends ConsumerWidget {
             ),
             const SizedBox(height: 24),
           ],
-        ),
-      ),
-    );
+        );
   }
 
   /// Phase 1: edit the saved city (profiles.city). Browsing follows the

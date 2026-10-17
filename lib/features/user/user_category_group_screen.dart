@@ -4,6 +4,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../core/models/category.dart';
 import '../../core/theme/app_theme.dart';
+import '../../core/utils/category_icons.dart';
 import '../../core/utils/friendly_error.dart';
 import '../../core/widgets/cart_icon_button.dart';
 import '../../core/widgets/load_error_view.dart';
@@ -294,7 +295,13 @@ class _UserCategoryGroupScreenState extends State<UserCategoryGroupScreen> {
                     color: AppTheme.primaryGreen.withOpacity(0.10),
                     borderRadius: BorderRadius.circular(12),
                   ),
-                  child: const Icon(Icons.category_outlined,
+                  // The category's own sector glyph — the same rule the home
+                  // rail's chips use (core/utils/category_icons.dart), so a
+                  // food category wears the same icon here as it does on the
+                  // rail that led to this screen. Was one generic glyph for
+                  // every row, which told the buyer nothing about what is
+                  // behind the row.
+                  child: Icon(categoryIconForSector(c.marketplaceSector),
                       color: AppTheme.primaryGreenDark, size: 20),
                 ),
                 const SizedBox(width: 12),

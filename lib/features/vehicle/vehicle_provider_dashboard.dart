@@ -15,6 +15,7 @@ import '../../core/widgets/load_error_view.dart';
 import '../../core/widgets/rank_badge.dart';
 import '../../core/widgets/dashboard_top_tabs.dart';
 import '../../core/widgets/quick_action_pill.dart';
+import '../user/user_profile_screen.dart' show AccountDashboard;
 
 class VehicleProviderDashboard extends ConsumerStatefulWidget {
   const VehicleProviderDashboard({super.key});
@@ -374,17 +375,14 @@ class _VehicleProviderDashboardState
                             ],
                           ),
                         ),
+                        // The SAME account dashboard a buyer gets — see
+                        // [AccountDashboard]. The other tabs are unchanged.
                         DashboardTab(
                           label: 'Account',
                           icon: Icons.person_outline,
-                          builder: (_) => Column(
-                            children: [
-                              _action(
-                                  Icons.account_balance_wallet_outlined,
-                                  'Wallet', () => context.push('/wallet')),
-                              _action(Icons.person_outline, 'Profile',
-                                  () => context.push('/profile')),
-                            ],
+                          builder: (_) => const AccountDashboard(
+                            embedded: true,
+                            padding: EdgeInsets.zero,
                           ),
                         ),
                         DashboardTab(

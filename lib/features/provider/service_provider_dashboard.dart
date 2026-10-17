@@ -16,6 +16,7 @@ import '../../core/widgets/publish_readiness_banner.dart';
 import '../../core/widgets/rank_badge.dart';
 import '../../core/widgets/dashboard_top_tabs.dart';
 import '../../core/widgets/quick_action_pill.dart';
+import '../user/user_profile_screen.dart' show AccountDashboard;
 import 'provider_payment_methods_screen.dart';
 
 class ServiceProviderDashboard extends ConsumerStatefulWidget {
@@ -687,16 +688,18 @@ class _ServiceProviderDashboardState
                                 () => context.push('/provider/payment-verification')),
                           ]),
                         ),
+                        // The SAME account dashboard a buyer gets, not a
+                        // two-row stub: one definition ([AccountDashboard]),
+                        // so every role sees the same wallet, appeals, city,
+                        // Terms and deletion doors. The Business, Catalogue
+                        // and Orders tabs above are unchanged.
                         DashboardTab(
                           label: 'Account',
                           icon: Icons.person_outline,
-                          builder: (_) => _actionList([
-                            _action(
-                                Icons.account_balance_wallet_outlined, 'Wallet',
-                                () => context.push('/wallet')),
-                            _action(Icons.person_outline, 'Profile',
-                                () => context.push('/profile')),
-                          ]),
+                          builder: (_) => const AccountDashboard(
+                            embedded: true,
+                            padding: EdgeInsets.zero,
+                          ),
                         ),
                       ],
                     ),
