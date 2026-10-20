@@ -492,6 +492,12 @@ PRE_AUTH_FUNCTIONS = {
     "login-gate": "CAPTCHA + lockout gate; runs before the credential check",
     "staff-login": "staff credential check; the caller has no session yet",
     "index-chunks": "unauthenticated repository indexing",
+    # Found while diagnosing "registration hangs after submitting": send-otp
+    # verifies an address BEFORE the account exists, so its caller is always
+    # signed out. Without the flag the gateway answered 401 before the body
+    # ran, no code was ever sent, and signup could never get past the code
+    # step — the same defect class as login-gate, one endpoint later.
+    "send-otp": "signup OTP delivery; the account does not exist yet",
 }
 
 

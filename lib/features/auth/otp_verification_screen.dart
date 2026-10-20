@@ -124,11 +124,25 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
       _error = null;
     });
     try {
-      await OtpService.instance.sendOtp(
+      final result = await OtpService.instance.sendOtp(
         _email,
         captchaId: challengeId,
       );
       if (!mounted) return;
+      // The server did not send a code because it does not require one
+      // (`signup_otp_required` is off): `send-otp` answers `{delivered:false,
+      // skipped:"email_verification_disabled"}`. There is nothing to type and
+      // nothing will ever arrive, so asking for six digits is a dead end —
+      // which is exactly how registration used to hang on this screen. Say so
+      // once, complete the step, and let the signup screen create the account
+      // (handle_new_user() reads the same toggle and lets it through).
+      if (result.skipped) {
+        setState(() => _sending = false);
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) context.pop(true);
+        });
+        return;
+      }
       setState(() {
         _sending = false;
         _showResendCaptcha = false;
@@ -144,7 +158,16 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
         _resendIn = e.retryAfterSeconds;
       });
       _startResendCountdown();
-    } catch (e) {
+    } on OtpUnavailableException catch (e) {
+      // The endpoint's own reason, not "check your connection": when the
+      // gateway refuses an anonymous call the connection is fine and telling
+      // the user to check it hides the defect behind a plausible excuse.
+      if (!mounted) return;
+      setState(() {
+        _sending = false;
+        _error = e.message;
+      });
+    } catch (_) {
       if (!mounted) return;
       setState(() {
         _sending = false;

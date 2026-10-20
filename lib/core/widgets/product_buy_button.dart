@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../services/cart_service.dart';
+import '../services/guest_session.dart';
 import '../theme/app_theme.dart';
 import '../utils/friendly_error.dart';
 
@@ -65,6 +66,20 @@ class _ProductBuyButtonState extends ConsumerState<ProductBuyButton> {
     // the tap is never dead.
     if (widget.productId.isEmpty) {
       context.push('/user/provider/${widget.providerId}');
+      return;
+    }
+    // GUEST INTERCEPTION — the transaction moment, and the only place a guest
+    // is stopped. It has to happen BEFORE addToCart: that insert is refused by
+    // RLS for an anonymous caller, so a guest who got past this point would
+    // see "you do not have permission" instead of the registration form.
+    // Nothing earlier in the app is gated, so browsing stays complete.
+    if (ref.read(guestModeProvider)) {
+      await requestAccountToContinue(
+        context,
+        action: widget.label.toLowerCase() == 'book'
+            ? 'book this service'
+            : 'buy this listing',
+      );
       return;
     }
     setState(() => _busy = true);

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../core/providers/auth_provider.dart';
+import '../core/services/guest_session.dart';
 import '../features/splash/splash_screen.dart';
 import '../features/auth/login_screen.dart';
 import '../features/auth/signup_screen.dart' show SignupScreen, SignupRole;
@@ -111,13 +112,31 @@ import '../features/help_chat/help_chat_screen.dart';
 /// the database trigger may not have completed by the time
 /// [GoRouter] first evaluates the redirect, so we wait briefly and
 /// refresh the profile once.
+///
+/// It listens to the GUEST flag as well, and clears it the moment a real
+/// session exists. Both halves matter: the router has to re-run its redirect
+/// when somebody taps "Continue as Guest", and a guest who then signs in must
+/// not keep carrying the flag into an authenticated session — a lingering
+/// `isGuest` would keep the account routes closed for a signed-in user, which
+/// is a worse bug than the one guest mode fixes.
 class _AuthRefreshNotifier extends ChangeNotifier {
   _AuthRefreshNotifier(this._ref) {
-    _sub = _ref.listen<AuthState>(authProvider, (_, __) => notifyListeners());
+    _sub = _ref.listen<AuthState>(authProvider, (_, next) {
+      if (next.isAuthenticated) {
+        // Real session: guest browsing is over. Safe here (outside the
+        // redirect callback) — ending it inside redirect() would mutate a
+        // provider while go_router is deciding where to go.
+        _ref.read(guestModeProvider.notifier).end();
+      }
+      notifyListeners();
+    });
+    _guestSub =
+        _ref.listen<bool>(guestModeProvider, (_, __) => notifyListeners());
   }
 
   final Ref _ref;
   late final ProviderSubscription<AuthState> _sub;
+  late final ProviderSubscription<bool> _guestSub;
   bool _profileRetryScheduled = false;
 
   /// Call when redirect sees an authenticated user with no profile.
@@ -135,6 +154,7 @@ class _AuthRefreshNotifier extends ChangeNotifier {
   @override
   void dispose() {
     _sub.close();
+    _guestSub.close();
     super.dispose();
   }
 }
@@ -161,6 +181,10 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       final authState = ref.read(authProvider);
       final isLoading = authState.isLoading;
       final isAuthenticated = authState.isAuthenticated;
+      // The third session state (guest_session.dart). Read, never watched:
+      // this callback is the reader, and _AuthRefreshNotifier above is what
+      // makes go_router re-evaluate when the flag moves.
+      final isGuest = ref.read(guestModeProvider);
       final loc = state.matchedLocation;
       final isAuthRoute = loc == '/login' ||
           loc == '/role-select' ||
@@ -180,8 +204,28 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       // Still loading — don't redirect yet.
       if (isLoading) return null;
 
-      // Not authenticated — redirect to login (unless already on an auth route).
+      // ── No session ──
+      // Two different visitors arrive here, and they must not be treated
+      // alike any more:
+      //
+      //   * a GUEST ("Continue as Guest" on the welcome screen) browses the
+      //     marketplace. The account and workspace routes are closed, and the
+      //     transaction routes open the standard user registration at the
+      //     exact moment they are attempted — Buy, Book, CHECKOUT, a ride
+      //     request. Nothing is gated earlier than that.
+      //   * everybody else is sent to sign in, exactly as before.
       if (!isAuthenticated) {
+        if (isGuest) {
+          // The splash screen is a spinner that only exists so the router can
+          // decide; a guest has already decided, so it goes straight in.
+          if (loc == '/') return '/user';
+          if (guestBlockedTransaction(loc)) return '/signup/user';
+          if (guestBlockedAccount(loc)) return '/login';
+          if (isApprovalRoute) return '/user';
+          // Browsing routes, the marketplace detail pages, search, the map,
+          // the legal pages, and the sign-in/sign-up screens are open.
+          return null;
+        }
         if (isAuthRoute || isSignupRoute) return null;
         return '/login';
       }
@@ -294,6 +338,9 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       }
 
       // ── On an auth route (login, signup, role-select) — redirect away ──
+      // The guest flag is already cleared by _AuthRefreshNotifier on the same
+      // auth change that got us here, so a guest who signs in is forwarded to
+      // their real dashboard with no trace of guest mode.
       if (isAuthRoute || isSignupRoute) {
         return _getDashboardPath(authState);
       }

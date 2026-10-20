@@ -2837,3 +2837,90 @@ workflow picks it up — but no migration can fix it, because the failure is at
 the gateway, before the function body. A build shipped against the old
 configuration cannot sign in *anyone* in, and the app says "sign-in is
 temporarily unavailable", which names neither the function nor the flag.
+
+### 7.1.15 Registration that never finished, and browsing that needed an account
+
+Two reports from the same device, and they turned out to be one theme: the app
+gating at the wrong moment, and never saying why.
+
+#### The signup flow never reached `signUp()`
+
+The submit handler (`_handleSubmit`) is: validate → privacy checkbox → the
+CAPTCHA the rework made always-on → park the draft → **the email-OTP step** →
+`auth.signUp()` → `accept_terms` → the welcome banner → the dashboard. The
+account is created at step five, so anything that stops the flow before it
+produces exactly the report "registration hangs after submitting, never
+completes account creation", with no error, because nothing failed on the
+client.
+
+There were three ways it stopped, and all three are fixed:
+
+1. **`send-otp` was deployed with the gateway's default `verify_jwt=true`.**
+   It is a pre-authentication endpoint by construction — it verifies an
+   address *before* the account exists, from `/otp-verify`, which a signed-out
+   visitor reaches from the signup form — and `supabase/config.toml` declares
+   no `[functions.send-otp]` override. So the gateway answered 401 before the
+   function body ran, `OtpService.sendOtp` threw, `_requestCode` caught it, and
+   the screen said "could not send the code" while retrying could never help;
+   with `signup_otp_required` on, `handle_new_user()` also refuses the account.
+   This is the same defect §7.2 records for `login-gate`, one endpoint later,
+   and it is now impossible to reintroduce: the deploy step passes
+   `--no-verify-jwt` and `send-otp` is in `PRE_AUTH_FUNCTIONS`.
+2. **The code screen was a dead end when the gate is OFF.** `send-otp` answers
+   `{delivered:false, skipped:"email_verification_disabled"}` — it sent
+   nothing, on purpose — and the client collapsed that into "success" and went
+   on asking for six digits that could never arrive. `OtpService.sendOtp` now
+   returns [delivered / skipped] as data, and the screen completes the step and
+   pops when the server says no code is required (which is also what
+   `handle_new_user()` reads, so the two cannot disagree).
+3. **Nothing in the account step was bounded.** `auth.signUp()`, the
+   `accept_terms` write, and two of `_loadUserProfile`'s sub-reads
+   (`staff_credentials`, `is_ceo_authority`) had no deadline, and the
+   full-screen "Creating account…" scrim is only dismissed by the `catch`
+   block. A call that never answers is not an exception, so the scrim outlived
+   the attempt: a spinner with a disabled button and no sentence, until the app
+   was killed. Every step now has a deadline, the scrim is released in a
+   `finally`, and a timeout says the one thing that is actually true — the
+   account may exist, so try signing in before registering again.
+
+The handler keeps six one-line `[signup] n/6 …` console markers. They are not
+removed, and that is deliberate: the last defect in this flow was invisible
+from the screen, so the next device test should be able to say *where* it
+stopped. They print no account data and render nothing.
+
+#### Guest mode: browse first, register at the transaction
+
+The app had two session states, so a visitor who had not registered could see
+nothing at all — the worst first impression for a marketplace whose product is
+its listings. `lib/core/services/guest_session.dart` adds the third state:
+memory-only, no Supabase session, so every read still runs as `anon` under the
+same RLS the public catalogue uses.
+
+- `LoginScreen` gains **CONTINUE AS GUEST**, which sets the flag and opens
+  `/user` (the Part 14 home). Nothing is created and no token is issued.
+- The router's redirect gains one branch, inside `!isAuthenticated`: a guest is
+  allowed through instead of being sent to `/login`. The authenticated branch
+  is untouched, so no real account's routing changes, and the redirect-cycle
+  simulation still settles on every combination.
+- `guestBlockedTransaction()` is the gate, and it fires at the attempt: the
+  listing's BUY/BOOK (`ProductBuyButton`, and the product page's buy-now)
+  intercepts **before** the cart write — an anonymous insert is refused by RLS,
+  so a guest who got past that point would read "you do not have permission"
+  instead of a registration form — and the router turns any remaining
+  transaction route (`/user/availability`, `/user/checkout`, `/user/payment`,
+  `/user/order-waiting`, `/user/ride-request`, `/user/orders/:id`) into
+  `/signup/user`. Always the STANDARD user signup: a buyer, a booker and a
+  rider need the same account, and the provider and staff-assisted paths are
+  unrelated to the tap that triggered this.
+- The dashboard serves the guest: Home is real, and Order / Favourite / Account
+  become one panel that says what an account is for and offers both doors.
+  They are replaced rather than queried, because an owner-scoped read with no
+  owner is a broken screen, not an empty one.
+- Signing in clears the flag (in the router's auth listener, outside the
+  redirect callback), so a guest who registers becomes an ordinary account
+  with no trace of guest mode — a lingering flag would keep the account routes
+  closed for a signed-in user.
+
+Nothing here weakens a server rule. The transaction RPCs already refuse an
+anonymous caller; guest mode only makes the refusal happen at the tap, with a
+sentence, instead of at an RLS wall.

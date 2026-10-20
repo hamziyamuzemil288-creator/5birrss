@@ -10,6 +10,7 @@ import '../../core/widgets/primary_button.dart';
 import '../../core/widgets/birr_text_field.dart';
 import '../../core/utils/friendly_error.dart';
 import '../../core/services/login_identity.dart';
+import '../../core/services/guest_session.dart';
 import 'password_reset_request_sheet.dart';
 import '../../core/services/staff_admin_service.dart';
 import '../../core/services/staff_gateway_service.dart';
@@ -221,6 +222,17 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     }
   }
 
+  /// "Continue as Guest" — into the marketplace, without an account.
+  ///
+  /// No Supabase call happens here: the flag is memory-only and the router's
+  /// guest branch is what opens the browsing routes. The session stays
+  /// anonymous, so every read still runs under `anon` RLS, and the transaction
+  /// entry points intercept the tap (core/services/guest_session.dart).
+  void _continueAsGuest() {
+    ref.read(guestModeProvider.notifier).start();
+    context.go('/user');
+  }
+
   /// Wait for the signed-in account's profile and roles to arrive.
   ///
   /// Returns true as soon as the router has everything it needs to forward
@@ -252,8 +264,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
   /// Task 15: open the Google consent screen. The session comes back via
   /// the auth listener (deep link) — failures surface as readable errors.
-  Future<void> _handleGoogleSignIn() async {
-    setState(() {
+  Future<void> _handleGoogleSignIn() async {    setState(() {
       _isLoading = true;
       _error = null;
     });
@@ -632,6 +643,46 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                         GoogleSignInButton(
                           isLoading: _isLoading,
                           onPressed: _handleGoogleSignIn,
+                        ),
+                        const SizedBox(height: 18),
+                        // Guest browsing: the marketplace IS the product, so a
+                        // visitor can walk through it before deciding to
+                        // register. Nothing is created and no session exists —
+                        // buying, booking and requesting a ride still open the
+                        // standard registration at that exact moment
+                        // (core/services/guest_session.dart owns that rule).
+                        SizedBox(
+                          width: double.infinity,
+                          child: OutlinedButton.icon(
+                            onPressed: _isLoading ? null : _continueAsGuest,
+                            icon: const Icon(Icons.storefront_outlined,
+                                size: 18),
+                            label: const Text('CONTINUE AS GUEST'),
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: AppTheme.primaryGreen,
+                              side: const BorderSide(
+                                  color: AppTheme.primaryGreen),
+                              padding:
+                                  const EdgeInsets.symmetric(vertical: 14),
+                              textStyle: const TextStyle(
+                                  fontSize: 13, fontWeight: FontWeight.w700),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        const Text(
+                          'Browse products, services and providers without an '
+                          'account. You will be asked to register when you buy, '
+                          'book or request a ride.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            height: 1.4,
+                            color: AppTheme.textMuted,
+                          ),
                         ),
                       ],
                     ),

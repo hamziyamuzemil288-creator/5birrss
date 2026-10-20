@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart' show debugPrint;
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -250,11 +251,16 @@ class AuthNotifier extends StateNotifier<AuthState> {
       // deliberately user-scoped and contains no password data.
       bool isStaffGateway = false;
       try {
+        // Bounded for the same reason the two queries above are: this runs
+        // INSIDE signUp()/signIn()'s await chain, on screens that show a
+        // blocking spinner. A query that never answers is not an error, so
+        // nothing catches it and the spinner never clears.
         final gateway = await _svc.client
             .from('staff_credentials')
             .select('staff_id')
             .eq('user_id', user.id)
-            .maybeSingle();
+            .maybeSingle()
+            .timeout(const Duration(seconds: 10));
         isStaffGateway = gateway != null;
       } catch (_) {
         // A pre-Task-12 database has no gateway table. Preserve the existing
@@ -274,7 +280,10 @@ class AuthNotifier extends StateNotifier<AuthState> {
       // authority rather than granting anything.
       var isCeoAuthority = false;
       try {
-        isCeoAuthority = await _svc.client.rpc('is_ceo_authority') == true;
+        isCeoAuthority = await _svc.client
+                .rpc('is_ceo_authority')
+                .timeout(const Duration(seconds: 10)) ==
+            true;
       } catch (_) {}
 
       state = state.copyWith(
@@ -365,7 +374,13 @@ class AuthNotifier extends StateNotifier<AuthState> {
           if (streetRoad != null && streetRoad.isNotEmpty)
             'street_road': streetRoad,
         },
-      );
+        // BOUNDED, deliberately. This is the call the "Creating account…"
+        // scrim waits on; GoTrue runs handle_new_user() inside it, so a slow
+        // or stalled signup is indistinguishable from a hang and NOTHING will
+        // throw to dismiss the scrim. Twenty seconds is well past a healthy
+        // signup (a second or two) and short enough to be a message rather
+        // than a mystery.
+      ).timeout(const Duration(seconds: 20));
 
       if (response.user == null) {
         throw Exception('Sign up failed: no user returned');
@@ -450,7 +465,7 @@ class AuthNotifier extends StateNotifier<AuthState> {
           if (referralCode != null && referralCode.trim().isNotEmpty)
             'referral_code': referralCode.trim(),
         },
-      );
+      ).timeout(const Duration(seconds: 20));
 
       if (response.user == null) {
         throw Exception('Sign up failed');
@@ -474,8 +489,12 @@ class AuthNotifier extends StateNotifier<AuthState> {
       // one tap from fixing it.
       if (categoryId != null && categoryId.isNotEmpty) {
         try {
-          await _svc.client.rpc('provider_claim_category',
-              params: {'p_category_id': categoryId});
+          // Bounded: best-effort bookkeeping must not hold the signup
+          // spinner — the account and its provider row already exist.
+          await _svc.client
+              .rpc('provider_claim_category',
+                  params: {'p_category_id': categoryId})
+              .timeout(const Duration(seconds: 10));
         } catch (e) {
           debugPrint('provider_claim_category failed (non-fatal): $e');
         }

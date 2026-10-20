@@ -19,13 +19,24 @@ class CaptchaService {
 
   SupabaseClient get _client => Supabase.instance.client;
 
+  /// How long a challenge call gets before the widget offers a retry.
+  ///
+  /// The field renders a spinner while one of these is in flight. An
+  /// unanswered call is not an error, so without a deadline nothing would
+  /// ever clear that spinner — the widget would sit on "Loading a fresh
+  /// question…" with no way forward, which is the same class of defect as the
+  /// registration scrim.
+  static const Duration _timeout = Duration(seconds: 15);
+
   /// Whether the owner has enabled CAPTCHA enforcement.
   ///
   /// A lookup failure defaults to true so a network problem cannot silently
-  /// bypass the server-side signup/appeal gate.
+  /// bypass the server-side signup/appeal gate. Bounded: this is awaited by
+  /// the signup screen's own gate load, and its fail-closed default is only
+  /// useful if it is reached promptly.
   Future<bool> isRequired() async {
     try {
-      return await _client.rpc('captcha_required') == true;
+      return await _client.rpc('captcha_required').timeout(_timeout) == true;
     } catch (_) {
       return true;
     }
@@ -33,7 +44,7 @@ class CaptchaService {
 
   /// Requests a fresh challenge. Answers are generated and stored server-side.
   Future<CaptchaChallenge> request() async {
-    final data = await _client.rpc('request_captcha');
+    final data = await _client.rpc('request_captcha').timeout(_timeout);
     final raw = data is List && data.isNotEmpty ? data.first : data;
     final row = Map<String, dynamic>.from(raw as Map<dynamic, dynamic>);
     final id = row['captcha_id']?.toString();
@@ -50,7 +61,7 @@ class CaptchaService {
     final data = await _client.rpc(
       'verify_captcha',
       params: {'p_captcha_id': captchaId, 'p_answer': answer},
-    );
+    ).timeout(_timeout);
     final raw = data is List && data.isNotEmpty ? data.first : data;
     final row = Map<String, dynamic>.from(raw as Map<dynamic, dynamic>);
     if (row['ok'] == true) return;

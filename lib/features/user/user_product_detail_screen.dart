@@ -6,6 +6,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/services/favorites_service.dart';
 import '../../core/services/cart_service.dart';
+import '../../core/services/guest_session.dart';
 import '../../core/services/product_like_service.dart';
 import '../../core/services/review_service.dart';
 import '../../core/widgets/cart_icon_button.dart';
@@ -505,6 +506,20 @@ class _State extends ConsumerState<UserProductDetailScreen> {
   /// Direct-buy: put the chosen amount in the cart, then jump straight to
   /// checkout for this provider.
   Future<void> _buyNow() async {
+    // GUEST INTERCEPTION — this page's BUY/BOOK is the second way into the
+    // same transaction the listing tiles start, so it carries the same rule,
+    // and before the cart write rather than after it: an anonymous cart
+    // insert is refused by RLS (the error a guest used to see), while the
+    // registration form is the thing they can actually act on.
+    if (ref.read(guestModeProvider)) {
+      await requestAccountToContinue(
+        context,
+        action: (_product?['listing_type'] as String?) == 'SERVICE'
+            ? 'book this service'
+            : 'buy this listing',
+      );
+      return;
+    }
     final isUnitPriced =
         _product != null && (_product!['unit'] as String?) != null;
     double qty = 1;

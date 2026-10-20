@@ -261,11 +261,28 @@ jobs:
         if: ${{ !inputs.dry_run }}
         run: supabase functions deploy user-admin
 
-      # Email OTP delivery for signup (Task 7). Stub mode until an email
-      # provider is wired (see the function header for the TODO).
-      - name: Deploy function send-otp
+      # Email OTP delivery for signup (Task 7).
+      #
+      # --no-verify-jwt is REQUIRED here, for the same reason it is required on
+      # login-gate below: the caller has NO session yet. This endpoint exists to
+      # verify an address BEFORE the account is created, so it is invoked from
+      # `/otp-verify`, which a signed-out visitor reaches from the signup form.
+      # Supabase deploys functions with verify_jwt=true unless the flag is
+      # passed (this repo's supabase/config.toml declares no [functions.*]
+      # override), so without it the gateway answered every signup's request
+      # with a bare 401 before the function body ran: no code could ever be
+      # sent, `signup_screen` never got past the code step, and with
+      # `signup_otp_required` on, handle_new_user() refused the account as
+      # well. That is a registration that never completes, with the only
+      # visible symptom "could not send the code".
+      #
+      # Safe to expose: the function holds the service role but takes no
+      # caller identity at all. It is throttled by the CAPTCHA it consumes and
+      # by the per-address 60-second resend window, and it never reveals
+      # whether an address is registered.
+      - name: Deploy function send-otp (no JWT verification)
         if: ${{ !inputs.dry_run }}
-        run: supabase functions deploy send-otp
+        run: supabase functions deploy send-otp --no-verify-jwt
 
       - name: Deploy function staff-create-gateway
         if: ${{ !inputs.dry_run }}

@@ -560,6 +560,12 @@ class _SignupScreenState extends ConsumerState<SignupScreen> {
 
   Future<void> _handleSubmit() async {
     if (!_formKey.currentState!.validate()) return;
+    // Step markers for the device test that has to confirm this flow. Console
+    // only — nothing here is rendered, and no account data is printed. Each
+    // marker names the step so a stuck flow says WHERE it stopped instead of
+    // leaving one opaque "Creating account…" scrim.
+    debugPrint('[signup] 1/6 submit: otpRequired=$_otpRequired '
+        'captchaSolved=${_captchaId != null} agreed=$_agreedToTerms');
     if (!_agreedToTerms) {
       setState(() => _error =
           'Please read and accept the Privacy Policy to continue.');
@@ -613,13 +619,18 @@ class _SignupScreenState extends ConsumerState<SignupScreen> {
     // created immediately and waits for admin approval instead — which is
     // the gate that has always protected a new account.
     if (_otpRequired) {
+      debugPrint('[signup] 2/6 waiting for the email code');
       final verified = await context.push<bool>(
         '/otp-verify',
         extra: OtpArgs(draft: draft),
       );
+      debugPrint('[signup] 2/6 code step returned $verified');
       if (verified != true || !mounted) return;
     }
-    // Code verified — create the account now.
+    // Code verified (or the server does not require a code at all) — create
+    // the account now.
+    debugPrint('[signup] 3/6 creating account: role=${widget.role} '
+        'provider=$_isProvider assisted=${widget.assistedByStaff}');
     setState(() {
       _isLoading = true;
       _error = null;
@@ -675,13 +686,23 @@ class _SignupScreenState extends ConsumerState<SignupScreen> {
         return;
       }
 
+      debugPrint('[signup] 4/6 account exists, session present '
+          'hasSession=$hasSession');
+
       // Record the user's terms acceptance (version + timestamp) on the
-      // profile now that a session exists. Best-effort, never blocks.
+      // profile now that a session exists. Best-effort and BOUNDED: this runs
+      // between a created account and the navigation into the app, so a stall
+      // here shows "Creating account…" over an account that already exists.
+      // Five seconds is far longer than an UPDATE needs; if it is slower than
+      // that, the recording is lost and the account is not.
       try {
         await Supabase.instance.client
-            .rpc('accept_terms', params: {'p_version': kTermsVersion});
-      } catch (_) {
+            .rpc('accept_terms', params: {'p_version': kTermsVersion})
+            .timeout(const Duration(seconds: 5));
+        debugPrint('[signup] 5/6 terms accepted');
+      } catch (e) {
         // Non-fatal: the account itself was already created successfully.
+        debugPrint('[signup] 5/6 terms acceptance skipped: $e');
       }
 
       if (widget.assistedByStaff) {
@@ -716,17 +737,26 @@ class _SignupScreenState extends ConsumerState<SignupScreen> {
       // self-service signup. If the database has not yet run the
       // auto-approve migration, the router bounces this to
       // /pending-approval on its own; the screen never has to guess.
+      debugPrint('[signup] 6/6 navigating to the dashboard');
       context.go(switch (widget.role) {
         SignupRole.user => '/user',
         SignupRole.vehicleProvider => '/vehicle',
         SignupRole.serviceProvider => '/provider',
       });
     } catch (e) {
+      debugPrint('[signup] account creation failed: $e');
       if (mounted) {
-        setState(() {
-          _isLoading = false;
-          _error = _friendlyError(e.toString());
-        });
+        setState(() => _error = _friendlyError(e.toString()));
+      }
+    } finally {
+      // The scrim is released unconditionally, including on the success path:
+      // `_isLoading` used to be cleared only by the catch block, so any path
+      // that neither threw nor navigated (or a navigation that was refused)
+      // left a full-screen, undismissable "Creating account…" with the button
+      // disabled. That spinner outliving the attempt IS the reported hang —
+      // the message now comes from `_error`, where the user can act on it.
+      if (mounted && _isLoading) {
+        setState(() => _isLoading = false);
       }
     }
   }
@@ -748,6 +778,16 @@ class _SignupScreenState extends ConsumerState<SignupScreen> {
     }
     if (raw.contains('EMAIL_OTP_REQUIRED')) {
       return 'Email verification expired. Please verify your email again.';
+    }
+    // A signup that timed out is genuinely ambiguous: the account may have
+    // been created and the answer simply lost. Telling the user to "check your
+    // connection" would have them retry the registration and land on "this
+    // email already exists", which reads as a failure of an account that is
+    // actually there. Say which two things are true instead.
+    if (raw.contains('TimeoutException') || raw.contains('timed out')) {
+      return 'The server did not confirm in time. If you were then told the '
+          'email already exists, the account was created — sign in with the '
+          'password you chose.';
     }
     // See login_screen: the old fallthrough returned 'Registration failed:
     // $raw' and leaked the raw exception to anyone who could not register.
