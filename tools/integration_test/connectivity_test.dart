@@ -485,6 +485,27 @@ void main() {
       return true;
     }
 
+    /// Runs one anon read, tolerating only the pre-deploy grant gap, and
+    /// NAMES the read when the server refuses it. Connectivity run
+    /// 39680798914 failed with the bare PostgREST stack and
+    /// `permission denied for table provider_profiles` — nothing saying
+    /// WHICH of the two reads was refused, and the two travel different
+    /// policy paths: categories can only reach is_admin(), while the
+    /// products read goes through the owns_provider_profile arm and the
+    /// product_images embed's nested products policy. A refusal without a
+    /// read name cost an hour of ruling out every path in the repo.
+    Future<List<dynamic>?> _readOrTolerate(
+      String what,
+      Future<List<dynamic>> Function() run,
+    ) async {
+      try {
+        return await run();
+      } catch (e) {
+        if (await _tolerateMissingGuestGrant(e)) return null;
+        throw StateError('the guest read of $what was refused: $e');
+      }
+    }
+
     test('the fatal home-feed tables are readable by anon', () async {
       // Commit e724344 lets a visitor browse before registering, and the
       // guest home feed reads categories and products DIRECTLY — no
@@ -492,26 +513,25 @@ void main() {
       // it is the guest's error screen. RLS decides which rows a guest may
       // see; the table-level GRANT decides whether the query can start at
       // all, and 0011 revoked every table privilege from anon.
-      try {
-        final categories =
-            await client.from('categories').select('id').limit(1);
-        expect(categories, isA<List>(),
-            reason: 'anon cannot read public.categories — every guest home '
-                'load fails before categories_public_read is ever consulted.');
+      final categories = await _readOrTolerate('categories', () =>
+          client.from('categories').select('id').limit(1));
+      if (categories == null) return;
+      expect(categories, isA<List>(),
+          reason: 'anon cannot read public.categories — every guest home '
+              'load fails before categories_public_read is ever consulted.');
 
-        final products = await client
-            .from('products')
-            .select('id, product_images(id)')
-            .eq('is_active', true)
-            .limit(1);
-        expect(products, isA<List>(),
-            reason: 'anon cannot read public.products with its '
-                'product_images embed — the fatal home-feed read fails with '
-                '42501 and the guest lands on the error screen.');
-      } catch (e) {
-        if (await _tolerateMissingGuestGrant(e)) return;
-        rethrow;
-      }
+      final products = await _readOrTolerate(
+          'products with its product_images embed',
+          () => client
+              .from('products')
+              .select('id, product_images(id)')
+              .eq('is_active', true)
+              .limit(1));
+      if (products == null) return;
+      expect(products, isA<List>(),
+          reason: 'anon cannot read public.products with its '
+              'product_images embed — the fatal home-feed read fails with '
+              '42501 and the guest lands on the error screen.');
     });
 
     test('the guest gallery rail RPC runs as anon', () async {
@@ -546,8 +566,11 @@ void main() {
           reason: 'anon is missing a privilege the guest home feed reads '
               'directly (categories/products/product_images/provider_gallery/'
               'provider_trust_stats SELECT, or owns_provider_profile/'
-              'visible_gallery_for_city EXECUTE). If this fails right after '
-              'a deploy, migration 20261020000001 did not run.');
+              'is_admin/visible_gallery_for_city EXECUTE), a policy helper '
+              'lost SECURITY DEFINER and runs its provider_profiles read as '
+              'the caller, or one of the three read policies reaches '
+              'provider_profiles inline. If this fails right after a deploy, '
+              'migration 20261020000001 or 20261021000000 did not run.');
     });
   });
 
