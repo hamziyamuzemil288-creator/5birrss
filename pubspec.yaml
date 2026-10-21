@@ -1,7 +1,7 @@
 name: birr5
 description: Aliob — location-based multi-sector marketplace and service platform.
 publish_to: 'none'
-version: 1.7.14+122
+version: 1.7.15+123
 environment:
   sdk: '>=3.3.0 <4.0.0'
 
