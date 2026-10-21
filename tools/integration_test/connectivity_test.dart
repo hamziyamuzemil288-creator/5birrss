@@ -532,6 +532,23 @@ void main() {
           reason: 'anon cannot read public.products with its '
               'product_images embed — the fatal home-feed read fails with '
               '42501 and the guest lands on the error screen.');
+
+      // The app also reads the gallery table DIRECTLY as a guest in two
+      // caught places (user_home_screen's avatar fallback and the provider
+      // page gallery), so a denial here is not an error screen — it is every
+      // guest silently seeing no photos. Caught reads still belong to the
+      // surface: 20261020000001 granted the table, and the permissive
+      // gallery policies reaching provider_profiles inline (fixed by
+      // 20261021000001) is what emptied it.
+      final gallery = await _readOrTolerate('provider_gallery directly', () =>
+          client.from('provider_gallery').select('id').limit(1));
+      if (gallery == null) return;
+      expect(gallery, isA<List>(),
+          reason: 'anon cannot read public.provider_gallery directly — the '
+              'home avatar fallback and the provider-page gallery render '
+              'empty for every guest even though the table is granted, '
+              'because a permissive gallery read policy reaches '
+              'provider_profiles inline.');
     });
 
     test('the guest gallery rail RPC runs as anon', () async {
@@ -565,12 +582,15 @@ void main() {
       expect(await ok('assert_guest_browse_surface_is_readable'), isTrue,
           reason: 'anon is missing a privilege the guest home feed reads '
               'directly (categories/products/product_images/provider_gallery/'
-              'provider_trust_stats SELECT, or owns_provider_profile/'
-              'is_admin/visible_gallery_for_city EXECUTE), a policy helper '
-              'lost SECURITY DEFINER and runs its provider_profiles read as '
-              'the caller, or one of the three read policies reaches '
-              'provider_profiles inline. If this fails right after a deploy, '
-              'migration 20261020000001 or 20261021000000 did not run.');
+              'provider_trust_stats SELECT, or the browse helpers EXECUTE), '
+              'a browse helper lost SECURITY DEFINER and runs its '
+              'provider_profiles read as the caller, or ANY permissive '
+              'SELECT policy on the five granted tables reaches '
+              'provider_profiles inline — the v3 scan quotes the offending '
+              'policy by name and expression, because run 39685981264 died '
+              'on products_staff_reports_read while a three-name filter '
+              'stayed green. If this fails right after a deploy, migration '
+              '20261020000001 / 20261021000000 / 20261021000001 did not run.');
     });
   });
 
