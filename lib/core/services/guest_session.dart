@@ -50,12 +50,18 @@ final guestModeProvider =
 ///
 /// A guest who reaches one of these — by tapping Buy, the cart's CHECKOUT, a
 /// ride request, or a deep link — is sent to the standard user registration.
+/// The order receipts and the review forms belong here for the same reason
+/// the order detail does: they all attach to an order the guest never placed,
+/// and the useful answer for somebody holding one of those links is the
+/// registration form, not the sign-in screen.
 const List<String> _transactionRoutes = [
   '/user/availability',
   '/user/checkout',
   '/user/payment',
   '/user/order-waiting',
   '/user/ride-request',
+  '/documents',
+  '/review',
 ];
 
 /// Routes that belong to an ACCOUNT rather than to the marketplace.
@@ -64,6 +70,10 @@ const List<String> _transactionRoutes = [
 /// honest destination is the sign-in screen (they may already have an account).
 const List<String> _accountRoutePrefixes = [
   '/admin',
+  // An exact entry, not caught by the '/admin' prefix ('/admin-login' does
+  // not start with '/admin/'): a guest gets the same answer /staff/login
+  // already gives — the workspace doors are closed until they sign in.
+  '/admin-login',
   '/staff',
   '/provider',
   '/vehicle',
@@ -75,8 +85,6 @@ const List<String> _accountRoutePrefixes = [
   '/appeal',
   '/help',
   '/account/',
-  '/documents/',
-  '/review/',
   '/become-partner',
   '/admin-notifications',
   '/update-password',
@@ -107,7 +115,14 @@ bool guestBlockedTransaction(String location) {
 
 /// True when [location] is an account or workspace route.
 bool guestBlockedAccount(String location) {
-  for (final prefix in _accountRoutePrefixes) {
+  for (final raw in _accountRoutePrefixes) {
+    // Normalise before comparing. The matcher appends '/', so an entry that
+    // already ends with one ('/account/') only ever matched the impossible
+    // '/account//…' — which left /account/deletion, /account/password and
+    // every other trailing-slash entry OPEN to guests while the list
+    // claimed they were closed. Trailing-slash entries are now safe to
+    // write; a guest reaches an account surface only through /login.
+    final prefix = raw.endsWith('/') ? raw.substring(0, raw.length - 1) : raw;
     if (location == prefix || location.startsWith('$prefix/')) return true;
   }
   return false;

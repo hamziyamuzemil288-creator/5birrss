@@ -36,6 +36,13 @@ void main() {
         '/user/order-waiting',
         '/user/ride-request',
         '/user/orders/abc123',
+        // The order-shaped links outside /user/orders: receipts and review
+        // forms both attach to an order the guest never placed, so they get
+        // the registration form like the order detail does.
+        '/documents/order/abc123',
+        '/documents/ride/abc123',
+        '/review/new',
+        '/review/customer',
       ]) {
         expect(guestBlockedTransaction(route), isTrue,
             reason: '$route creates a transaction and needs an account');
@@ -51,6 +58,7 @@ void main() {
         '/user/category/c1',
         '/user/category-group/transport',
         '/map',
+        '/about',
         '/terms',
         '/login',
         '/signup/user',
@@ -65,14 +73,24 @@ void main() {
     test('workspaces and account surfaces are closed to a guest', () {
       for (final route in const [
         '/admin',
+        // The admin sign-in is closed exactly like /staff/login: a guest
+        // gets the standard sign-in screen, never a workspace door.
+        '/admin-login',
         '/staff/dashboard',
         '/provider/orders',
         '/vehicle/vehicles',
         '/profile',
+        '/profile/edit',
         '/wallet',
         '/user/cart',
         '/user/favorites',
         '/user/ride-history',
+        // The trailing-slash entries: the old matcher appended '/' to every
+        // prefix, so '/account/' + '/' never matched these and a guest could
+        // open account deletion and password change outright. This is the
+        // regression pin — it fails on the matcher, not on the list.
+        '/account/deletion',
+        '/account/password',
       ]) {
         expect(guestBlockedAccount(route), isTrue,
             reason: '$route needs an account or a workspace');
