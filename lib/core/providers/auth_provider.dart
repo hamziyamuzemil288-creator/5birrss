@@ -6,6 +6,8 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../services/city_service.dart';
 import '../models/models.dart';
+import '../resilience/app_failure.dart';
+import '../resilience/failure_mapper.dart';
 import '../services/supabase_service.dart';
 import '../services/provider_presence_service.dart';
 import '../utils/friendly_error.dart';
@@ -222,6 +224,19 @@ class AuthNotifier extends StateNotifier<AuthState> {
       // A newer load has started — discard this stale result.
       if (seq != _profileLoadSeq) return;
 
+      // The session this load started with no longer exists: the refresh
+      // failed while these reads were in flight and supabase dropped the
+      // token, so the answer above is an anonymous caller's — no profile row
+      // can match a null auth.uid(). Turning it into state would produce an
+      // "authenticated" user with no profile, and the router answers that
+      // shape by scheduling profile retries forever: cold start would sit on
+      // the splash screen behind a Retry that cannot succeed. End the session
+      // instead and the router sends the user to /login.
+      if (_svc.client.auth.currentSession == null) {
+        state = const AuthState(isLoading: false);
+        return;
+      }
+
       UserProfile? profile;
       if (profileData != null) {
         profile = UserProfile.fromJson(profileData);
@@ -311,11 +326,32 @@ class AuthNotifier extends StateNotifier<AuthState> {
     } catch (e) {
       // Only apply error state if no newer load has taken over.
       if (seq != _profileLoadSeq) return;
-// Keep the raw exception in the console for debugging; only the
+      // Keep the raw exception in the console for debugging; only the
       // user-facing text changes. splash_screen renders state.error
       // verbatim, so an unfiltered PostgrestException would put schema
       // detail on screen.
       debugPrint('auth profile-load failed: $e');
+
+      // A session the server refuses is not a load failure to retry. The
+      // splash screen's Retry cannot succeed, and keeping user set would
+      // park cold start on that error box with no door to sign in through —
+      // the reported "cold-start error, never reaches login" trap. Clear the
+      // token locally (no network: the server already refused it) and let
+      // the router send the user to /login. Every other failure keeps its
+      // retry, because an offline cold start is a load failure, not a dead
+      // account.
+      if (sessionIsUnusable(e)) {
+        try {
+          await _svc.client.auth.signOut(scope: SignOutScope.local);
+        } catch (_) {
+          // Local sign-out only clears stored state; if even that throws,
+          // the assignment below still closes the session for the router.
+        }
+        if (seq != _profileLoadSeq) return;
+        state = const AuthState(isLoading: false);
+        return;
+      }
+
       state = state.copyWith(
         user: user,
         isLoading: false,
@@ -647,6 +683,33 @@ class AuthNotifier extends StateNotifier<AuthState> {
     ProviderPresence.instance.stopHeartbeat();
     super.dispose();
   }
+}
+
+/// Whether [error] from a profile load means the STORED SESSION is
+/// unusable — the server refused the token — rather than a read that failed
+/// for an ordinary reason (offline, timeout, a grant denial).
+///
+/// Two signals, because the shared classifier files one fact two ways:
+///
+///  * [AppFailureMapper]'s `unauthorized` kind — a 401 status or jwt /
+///    refresh-token text. Using the mapper keeps this predicate from ever
+///    drifting from the sentence the error box would have shown.
+///  * The same dead-session text by itself: when a PostgrestException
+///    carries no status, the message path files PGRST301 ("JWT expired")
+///    as `forbidden`, and a refused JWT is not a permission problem.
+///
+/// Deliberately narrow the other way: timeouts, transport failures and
+/// 42501 grant denials keep their retry — being offline is not being signed
+/// out, and a missing GRANT is for the deploy to fix, not the user.
+bool sessionIsUnusable(Object error) {
+  if (AppFailureMapper.map(error).kind == AppFailureKind.unauthorized) {
+    return true;
+  }
+  final lower = error.toString().toLowerCase();
+  return lower.contains('pgrst301') ||
+      lower.contains('jwt expired') ||
+      lower.contains('refresh token not found') ||
+      lower.contains('invalid refresh token');
 }
 
 /// Provider instance.

@@ -95,6 +95,22 @@ bool isMissingFunctionError(Object error) {
   return false;
 }
 
+/// PostgREST's reply when the calling role holds no privilege on the object
+/// it reached for — SQLSTATE 42501 "permission denied" — and only that.
+///
+/// The read-side twin of [isMissingFunctionError]: a direct table read the
+/// caller's role cannot start (guest browsing reads `categories`/`products`
+/// as anon — 20261020000001 grants them) fails with 42501 before RLS is ever
+/// consulted. A denied FUNCTION call raises the same code through PostgREST's
+/// "could not find the function" shape, which [isMissingFunctionError]
+/// already covers. Any other shape — a policy error, a body error such as
+/// PRODUCT_NOT_FOUND, a null row — is a finding, never a pending grant.
+bool isPermissionDeniedError(Object error) {
+  final text = error.toString().toLowerCase();
+  if (text.contains('42501')) return true;
+  return text.contains('permission denied');
+}
+
 /// Conditions 1 and 2 of the tolerance: the name is one the repo proves is not
 /// deployed, and the server reported it as not present. Condition 3 — the live
 /// database agreeing — is checked by the caller, which holds the client.

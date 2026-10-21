@@ -464,6 +464,93 @@ void main() {
     });
   });
 
+  group('Guest browsing reads the public catalogue as anon', () {
+    /// The one genuinely-not-a-defect-yet case for this group: the guest
+    /// grants live in migration 20261020000001, and until it reaches the
+    /// live database anon really cannot make these reads — that is the
+    /// pending migration, not a new finding. Same three-condition rule the
+    /// function tolerance uses: the reply must be privilege denial, the
+    /// granting migration must sit past supabase/DEPLOYED_HEAD, and the live
+    /// catalog must agree the assertion that PROVES the grants is absent.
+    /// Once deployed, a denied read fails the suite — condition 3 is what
+    /// keeps a stale marker from hiding a later revoke.
+    Future<bool> _tolerateMissingGuestGrant(Object e) async {
+      if (!isPermissionDeniedError(e) && !isMissingFunctionError(e)) {
+        return false;
+      }
+      const fn = 'assert_guest_browse_surface_is_readable';
+      if (!_pendingDeployFunctions.contains(fn)) return false;
+      if (await _functionExists(fn) != false) return false;
+      _reportPendingDeploy(fn);
+      return true;
+    }
+
+    test('the fatal home-feed tables are readable by anon', () async {
+      // Commit e724344 lets a visitor browse before registering, and the
+      // guest home feed reads categories and products DIRECTLY — no
+      // try/catch around either one — so a 42501 here is not an empty rail,
+      // it is the guest's error screen. RLS decides which rows a guest may
+      // see; the table-level GRANT decides whether the query can start at
+      // all, and 0011 revoked every table privilege from anon.
+      try {
+        final categories =
+            await client.from('categories').select('id').limit(1);
+        expect(categories, isA<List>(),
+            reason: 'anon cannot read public.categories — every guest home '
+                'load fails before categories_public_read is ever consulted.');
+
+        final products = await client
+            .from('products')
+            .select('id, product_images(id)')
+            .eq('is_active', true)
+            .limit(1);
+        expect(products, isA<List>(),
+            reason: 'anon cannot read public.products with its '
+                'product_images embed — the fatal home-feed read fails with '
+                '42501 and the guest lands on the error screen.');
+      } catch (e) {
+        if (await _tolerateMissingGuestGrant(e)) return;
+        rethrow;
+      }
+    });
+
+    test('the guest gallery rail RPC runs as anon', () async {
+      // Best-effort in the app (a caught failure just hides the rail), but
+      // the revoke was deliberate in the other direction: 20261010000002
+      // removed anon from visible_gallery_for_city (PUBLIC included) while
+      // the client kept calling it as a guest — so every visitor's gallery
+      // rail was silently empty. The grant in 20261020000001 restores the
+      // call; the function's own body still only returns is_active photos
+      // owned by an APPROVED provider.
+      try {
+        final rows = await client.rpc('visible_gallery_for_city', params: {
+          'p_city': '',
+          'p_limit': 5,
+        });
+        expect(rows, isA<List>(),
+            reason: 'a guest cannot run visible_gallery_for_city — the '
+                'home-feed gallery rail renders empty for every visitor '
+                '(grant removed by 20261010000002, restored by '
+                '20261020000001).');
+      } catch (e) {
+        if (await _tolerateMissingGuestGrant(e)) return;
+        rethrow;
+      }
+    });
+
+    test('the anon grants are declared, not accidental', () async {
+      // The two tests above prove behavior; this one names the missing
+      // privilege when behavior regresses, so the failure says which GRANT
+      // was lost instead of only which screen broke.
+      expect(await ok('assert_guest_browse_surface_is_readable'), isTrue,
+          reason: 'anon is missing a privilege the guest home feed reads '
+              'directly (categories/products/product_images/provider_gallery/'
+              'provider_trust_stats SELECT, or owns_provider_profile/'
+              'visible_gallery_for_city EXECUTE). If this fails right after '
+              'a deploy, migration 20261020000001 did not run.');
+    });
+  });
+
   group('PostgREST embeds are backed by real foreign keys', () {
     test('every relationship the app embeds resolves', () async {
       // supabase_flutter embeds with `select('a, child(b)')`, which PostgREST
