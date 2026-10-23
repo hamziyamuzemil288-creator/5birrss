@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "564473004602",
+    "project_id": "birr-3ea9b",
+    "storage_bucket": "birr-3ea9b.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:564473004602:android:4aff9cddc89d11092eeb03",
+        "android_client_info": {
+          "package_name": "com.amistbirr.myapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBf20FzK-GR3cqrSS2yJtV9TLcFxi-aJXE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
