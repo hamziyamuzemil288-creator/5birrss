@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart' show debugPrint;
+import 'package:flutter/widgets.dart';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -57,6 +58,13 @@ class AuthState {
   /// router must send the user to /update-password before anything else.
   final bool isRecoverySession;
 
+  /// A one-time, user-facing notice shown on the login screen after the session
+  /// ended on its own (expired / revoked and could not be refreshed). Set only
+  /// by the settlement that signs a user out for a dead session, and cleared on
+  /// the next successful load, so the login screen can say WHY the user is
+  /// looking at it instead of silently landing there.
+  final String? sessionNotice;
+
   /// True when this account already runs a business of either kind.
   ///
   /// Used to hide "Become a Partner": a customer turning their existing
@@ -78,6 +86,7 @@ class AuthState {
     this.error,
     this.isCeoAuthority = false,
     this.isRecoverySession = false,
+    this.sessionNotice,
   });
 
   AuthState copyWith({
@@ -90,7 +99,9 @@ class AuthState {
     String? error,
     bool? isCeoAuthority,
     bool? isRecoverySession,
+    String? sessionNotice,
     bool clearError = false,
+    bool clearSessionNotice = false,
   }) {
     return AuthState(
       user: user ?? this.user,
@@ -102,6 +113,8 @@ class AuthState {
       error: clearError ? null : (error ?? this.error),
       isCeoAuthority: isCeoAuthority ?? this.isCeoAuthority,
       isRecoverySession: isRecoverySession ?? this.isRecoverySession,
+      sessionNotice:
+          clearSessionNotice ? null : (sessionNotice ?? this.sessionNotice),
     );
   }
 
@@ -162,7 +175,8 @@ class AuthState {
 }
 
 /// Auth state notifier managing Supabase auth + profile + roles.
-class AuthNotifier extends StateNotifier<AuthState> {
+class AuthNotifier extends StateNotifier<AuthState>
+    with WidgetsBindingObserver {
   final SupabaseService _svc;
   StreamSubscription<dynamic>? _authSub;
 
@@ -170,11 +184,26 @@ class AuthNotifier extends StateNotifier<AuthState> {
   /// call cannot overwrite state produced by a newer one.
   int _profileLoadSeq = 0;
 
+  /// Single-flight refresh: every caller that needs a fresh access token
+  /// awaits THIS future instead of firing its own refresh, so two parallel
+  /// profile loads can never race on Supabase's one-use refresh token.
+  Future<AuthResponse>? _refreshTask;
+
   AuthNotifier(this._svc) : super(const AuthState(isLoading: true)) {
     _init();
   }
 
   void _init() {
+    // Lifecycle: a resume from the background is the moment a long-backgrounded
+    // session is most likely to have gone stale, so re-validate it quietly.
+    // Guarded because a headless unit test can construct this notifier without
+    // a binding.
+    try {
+      WidgetsBinding.instance.addObserver(this);
+    } catch (_) {
+      // No binding (pure unit test) — lifecycle re-validation just won't run.
+    }
+
     // Listen for auth state changes
     _authSub = _svc.authStateChanges.listen((authState) async {
       final event = authState.event;
@@ -185,6 +214,14 @@ class AuthNotifier extends StateNotifier<AuthState> {
       } else if (event == AuthChangeEvent.signedOut) {
         state = const AuthState(isLoading: false);
       } else if (event == AuthChangeEvent.tokenRefreshed && session != null) {
+        await _loadUserProfile(session.user);
+      } else if (event == AuthChangeEvent.initialSession && session != null) {
+        // COLD-START RESTORE. On a restart with a stored session supabase
+        // emits initialSession, NOT signedIn — the branch this app used to
+        // omit. The synchronous currentSession check below usually covers it,
+        // but when the access token is already expired the two can race and the
+        // restore is missed. Handling the event makes restore explicit instead
+        // of relying on timing.
         await _loadUserProfile(session.user);
       } else if (event == AuthChangeEvent.passwordRecovery && session != null) {
         // The password-reset email was opened on this device. The session
@@ -203,7 +240,11 @@ class AuthNotifier extends StateNotifier<AuthState> {
     }
   }
 
-  Future<void> _loadUserProfile(User user, {bool isRecovery = false}) async {
+  Future<void> _loadUserProfile(
+    User user, {
+    bool isRecovery = false,
+    bool allowRefreshRetry = true,
+  }) async {
     // Bump the sequence so an older in-flight call cannot overwrite our result.
     final seq = ++_profileLoadSeq;
 
@@ -341,14 +382,31 @@ class AuthNotifier extends StateNotifier<AuthState> {
       // retry, because an offline cold start is a load failure, not a dead
       // account.
       if (sessionIsUnusable(e)) {
-        try {
-          await _svc.client.auth.signOut(scope: SignOutScope.local);
-        } catch (_) {
-          // Local sign-out only clears stored state; if even that throws,
-          // the assignment below still closes the session for the router.
+        // THE restore-path fix. A cold start (or a resume after the app sat
+        // backgrounded) commonly finds the stored ACCESS token expired while
+        // the REFRESH token is still perfectly good. gotrue refreshes on its
+        // own schedule, but this profile read can race ahead of that refresh
+        // and come back 401/PGRST301 — auth-shaped, and therefore easy to
+        // mistake for a dead session. Settling here is exactly what dropped a
+        // valid, refreshable user into the login screen on every restart.
+        //
+        // So an auth-shaped failure with a session still present is not settled
+        // until ONE single-flight refresh has had its say:
+        //   * refresh succeeds             -> retry the load with the fresh token
+        //   * refresh is refused (revoked) -> the session is genuinely over:
+        //                                    settle to /login WITH a message
+        //   * refresh can't reach the net  -> offline, not signed out: keep the
+        //                                    retry like any load failure
+        if (allowRefreshRetry && _svc.client.auth.currentSession != null) {
+          await _recoverWithRefresh(user, seq);
+          return;
         }
-        if (seq != _profileLoadSeq) return;
-        state = const AuthState(isLoading: false);
+
+        // No session to refresh, or this was already the retry: settle the dead
+        // session. Clear the token locally (no network needed — the server
+        // already refused it) so the next launch goes straight to /login, and
+        // leave a message so the user is told why.
+        await _settleDeadSession(seq);
         return;
       }
 
@@ -358,6 +416,91 @@ class AuthNotifier extends StateNotifier<AuthState> {
         error: friendlyError(e, context: 'Could not load your account'),
       );
     }
+  }
+
+  /// Attempt a single-flight refresh and, on success, retry the profile load
+  /// once with the fresh token. On a terminal refusal, settle to /login with a
+  /// clear message. On a network failure, keep the ordinary retry — being
+  /// offline is not being signed out.
+  Future<void> _recoverWithRefresh(User user, int seq) async {
+    AuthResponse refreshed;
+    try {
+      refreshed = await _singleFlightRefresh();
+    } catch (refreshErr) {
+      if (seq != _profileLoadSeq) return;
+      // A refresh that cannot reach the network is a load failure, not a dead
+      // account — keep the retry exactly like any other transient error.
+      if (!sessionIsUnusable(refreshErr)) {
+        state = state.copyWith(
+          user: user,
+          isLoading: false,
+          error: friendlyError(refreshErr,
+              context: 'Could not load your account'),
+        );
+        return;
+      }
+      // The refresh token itself was refused: the session is over.
+      await _settleDeadSession(seq);
+      return;
+    }
+
+    if (seq != _profileLoadSeq) return;
+    final session = refreshed.session;
+    if (session == null) {
+      await _settleDeadSession(seq);
+      return;
+    }
+    // Fresh token — retry the load once. allowRefreshRetry:false guards the
+    // recursion so a load that fails again auth-shaped cannot loop.
+    await _loadUserProfile(session.user, allowRefreshRetry: false);
+  }
+
+  /// Single-flight refresh. Concurrent callers share one in-flight refresh
+  /// instead of firing parallel refreshes that race on the one-use refresh
+  /// token (Supabase rotates it on every use, so two concurrent refreshes can
+  /// invalidate each other and sign the user out for real).
+  Future<AuthResponse> _singleFlightRefresh() {
+    final inFlight = _refreshTask;
+    if (inFlight != null) return inFlight;
+    final task = _svc.client.auth
+        .refreshSession()
+        .timeout(const Duration(seconds: 15))
+        .whenComplete(() => _refreshTask = null);
+    _refreshTask = task;
+    return task;
+  }
+
+  /// End a session the server will not honour: drop the stored token locally
+  /// (no network — it is already refused), stop presence, and land on a clean
+  /// signed-out state carrying a message so the login screen can explain WHY
+  /// rather than silently appearing.
+  Future<void> _settleDeadSession(int seq) async {
+    try {
+      await _svc.client.auth.signOut(scope: SignOutScope.local);
+    } catch (_) {
+      // Local sign-out only clears stored state; if even that throws, the
+      // assignment below still closes the session for the router.
+    }
+    ProviderPresence.instance.stopHeartbeat();
+    if (seq != _profileLoadSeq) return;
+    state = const AuthState(
+      isLoading: false,
+      sessionNotice: 'Your session ended. Please sign in again.',
+    );
+  }
+
+  /// Quiet re-validation when the app returns to the foreground. A session that
+  /// went stale while backgrounded is refreshed transparently by the profile
+  /// reload below; a session that is truly gone settles through the exact same
+  /// path as a cold start. Best-effort: a resume on a dead network must never
+  /// interrupt the user.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState lifecycle) {
+    if (lifecycle != AppLifecycleState.resumed) return;
+    final session = _svc.client.auth.currentSession;
+    if (session == null) return; // signed out / guest — nothing to revalidate
+    if (!state.isAuthenticated) return; // don't resurrect a settled state
+    unawaited(refreshProfile().catchError((_) {}));
   }
 
   AppUserRole _parseRole(String role) {
@@ -680,6 +823,11 @@ class AuthNotifier extends StateNotifier<AuthState> {
   @override
   void dispose() {
     _authSub?.cancel();
+    try {
+      WidgetsBinding.instance.removeObserver(this);
+    } catch (_) {
+      // No binding to remove from (headless test) — nothing to clean up.
+    }
     ProviderPresence.instance.stopHeartbeat();
     super.dispose();
   }
@@ -730,4 +878,27 @@ final isAuthenticatedProvider = Provider<bool>((ref) {
 /// Convenience provider: the user's primary non-USER role.
 final primaryRoleProvider = Provider<AppUserRole?>((ref) {
   return ref.watch(authProvider).primaryRole;
+});
+
+/// The single, central session tri-state every screen should react to.
+///
+///  * `loading`         — the app is still restoring/validating the session on
+///                        cold start; the router holds (returns null) and
+///                        nothing should be decided yet. This is what stops a
+///                        cold start from defaulting to guest before the
+///                        restore check completes.
+///  * `authenticated`   — a real, loaded session.
+///  * `unauthenticated` — no session (a signed-out user). A GUEST is this state
+///                        plus the memory-only `guestModeProvider` flag; guest
+///                        mode is deliberately not folded in here because it is
+///                        a UI browsing choice, not a session fact, and it does
+///                        not persist across restarts.
+enum AuthStatus { loading, authenticated, unauthenticated }
+
+final authStatusProvider = Provider<AuthStatus>((ref) {
+  final a = ref.watch(authProvider);
+  if (a.isLoading) return AuthStatus.loading;
+  return a.isAuthenticated
+      ? AuthStatus.authenticated
+      : AuthStatus.unauthenticated;
 });

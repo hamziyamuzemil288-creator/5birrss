@@ -35,6 +35,10 @@ dependencies:
   share_plus: ^13.2.0
   path_provider: ^2.1.0
   url_launcher: ^6.3.2
+  # Session tokens are persisted here, not in SharedPreferences: the access
+  # and refresh tokens live in the Android Keystore / iOS Keychain. See
+  # core/services/secure_session_storage.dart.
+  flutter_secure_storage: ^9.2.2
 
 dev_dependencies:
   flutter_test:

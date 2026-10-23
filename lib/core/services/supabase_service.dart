@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../app_build.dart';
 import '../config/env.dart';
+import 'secure_session_storage.dart';
 
 /// Thin wrapper around the Supabase client. Role checks are NEVER done
 /// client-side for authorization — this class is for reads/writes that RLS
@@ -53,6 +54,11 @@ class SupabaseService {
       // Limit realtime event rate to prevent abuse and reduce bandwidth.
       realtimeClientOptions: const RealtimeClientOptions(
         eventsPerSecond: 2,
+      ),
+      // Session persistence goes to the OS secure store (Keystore/Keychain),
+      // not plaintext SharedPreferences. See secure_session_storage.dart.
+      authOptions: const FlutterAuthClientOptions(
+        asyncStorage: SecureSessionStorage(),
       ),
     );
   }
