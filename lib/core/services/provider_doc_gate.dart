@@ -5,6 +5,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../theme/app_theme.dart';
+import '../utils/friendly_error.dart';
 import 'document_upload_service.dart';
 
 /// Tri-state result of a document check.
@@ -466,7 +467,10 @@ class _DocUploadSheetState extends State<_DocUploadSheet> {
       if (!mounted) return;
       setState(() {
         _uploading = false;
-        _error = 'Upload failed: ${e.toString().split('\n').first}';
+        // The shared mapper, not the exception's first line: a storage or
+        // RLS failure carries bucket names and policy detail that mean
+        // nothing to the person uploading their ID.
+        _error = friendlyError(e, context: 'Upload failed');
       });
     }
   }

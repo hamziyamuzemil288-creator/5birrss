@@ -11,6 +11,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/providers/auth_provider.dart';
 import '../../core/services/geocoding_service.dart';
+import '../../core/services/guest_session.dart';
 import '../../core/services/live_map_service.dart';
 import '../../core/services/location_service.dart';
 import '../../core/services/location_prompt.dart';
@@ -535,9 +536,17 @@ class _LiveMapScreenState extends ConsumerState<LiveMapScreen>
     });
   }
 
-  void _startRideRequest() {
+  Future<void> _startRideRequest() async {
     final dest = _destination;
     if (dest == null) return;
+    // GUEST INTERCEPTION — the map is a guest-open surface and this button
+    // starts a transaction. Same dialog as Buy/Book: explain, then the
+    // standard user registration. The router's transaction gate stays as
+    // the safety net for any path this misses.
+    if (ref.read(guestModeProvider)) {
+      await requestAccountToContinue(context, action: 'request a ride');
+      return;
+    }
     context.push('/user/ride-request', extra: {
       'label': _destinationLabel,
       'lat': dest.latitude,
@@ -1270,7 +1279,17 @@ class _LiveMapScreenState extends ConsumerState<LiveMapScreen>
             _drawerTile(context, Icons.home_outlined, 'Home', '/user'),
             _drawerTile(context, Icons.search, 'Search', '/user/search'),
             if (!_isDriver)
-              _drawerTile(context, Icons.directions_car_outlined, 'Request a ride', '/user/ride-request'),
+              _drawerTile(context, Icons.directions_car_outlined, 'Request a ride', '/user/ride-request',
+                  onTap: () async {
+                Navigator.of(context).pop();
+                // GUEST INTERCEPTION — same rule as the map's own ride CTA.
+                if (ref.read(guestModeProvider)) {
+                  await requestAccountToContinue(this.context,
+                      action: 'request a ride');
+                  return;
+                }
+                context.push('/user/ride-request');
+              }),
             if (!_isDriver)
               _drawerTile(context, Icons.history, 'Ride history', '/user/ride-history'),
             _drawerTile(context, Icons.account_balance_wallet_outlined, 'Wallet', '/wallet'),

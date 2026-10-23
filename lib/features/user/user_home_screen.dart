@@ -9,6 +9,7 @@ import '../../core/providers/auth_provider.dart' show cityProvider;
 import '../../core/resilience/app_failure.dart';
 import '../../core/resilience/safe_call.dart';
 import '../../core/services/city_service.dart';
+import '../../core/services/guest_session.dart';
 import '../../core/services/posting_gate.dart';
 import '../../core/services/ride_service.dart';
 import '../../core/services/product_like_service.dart';
@@ -1185,7 +1186,19 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
                   title: 'Book a ride',
                   subtitle: 'Request a driver',
                   tint: AppTheme.primaryGreen,
-                  onTap: () => context.push('/user/ride-request'),
+                  onTap: () async {
+                    // GUEST INTERCEPTION — Book-a-ride is a transaction entry
+                    // point on a guest-open screen. The router would redirect
+                    // a guest to /signup/user anyway, but the dialog names
+                    // the action first so the form reads as the next step of
+                    // it rather than as a broken button (same rule as Buy).
+                    if (ref.read(guestModeProvider)) {
+                      await requestAccountToContinue(context,
+                          action: 'request a ride');
+                      return;
+                    }
+                    context.push('/user/ride-request');
+                  },
                 ),
               ),
               const SizedBox(width: 12),

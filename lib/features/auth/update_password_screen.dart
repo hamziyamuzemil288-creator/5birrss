@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/providers/auth_provider.dart';
+import '../../core/utils/friendly_error.dart';
 import '../../core/widgets/primary_button.dart';
 import '../../core/widgets/birr_text_field.dart';
 
@@ -55,7 +56,11 @@ class _UpdatePasswordScreenState extends ConsumerState<UpdatePasswordScreen> {
       if (mounted) {
         setState(() {
           _isLoading = false;
-          _error = 'Could not update password: ${e.toString()}';
+          // Never the raw exception: a weak-password or rate-limit message
+          // from GoTrue is a technical string, and the shared mapper turns
+          // it (and anything unrecognised) into a sentence the user can act
+          // on — the same rule every other screen follows.
+          _error = friendlyError(e, context: 'Could not update password');
         });
       }
     }

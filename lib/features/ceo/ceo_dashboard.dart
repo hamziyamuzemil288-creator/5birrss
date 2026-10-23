@@ -8,6 +8,7 @@ import '../../core/providers/auth_provider.dart';
 // directly to catch it — catching it by type is what keeps the friendly
 // message on screen instead of a raw PostgREST string.
 import '../../core/resilience/app_failure.dart';
+import '../../core/resilience/failure_mapper.dart';
 import '../../core/resilience/safe_call.dart';
 import '../../core/theme/app_theme.dart';
 
@@ -112,15 +113,16 @@ class _CeoDashboardState extends ConsumerState<CeoDashboard>
     }
   }
 
-  /// AppFailure carries a plain message; anything else is not shown verbatim.
+  /// A plain sentence from the shared mapper — never the exception verbatim.
+  ///
+  /// This used to pull `message: …` out of the exception's toString() with a
+  /// regex, which happily extracted `permission denied for table …` — exactly
+  /// the schema detail the mapper exists to keep off a screen. An
+  /// [AppFailure] keeps the classification a service layer made; anything
+  /// else is re-derived and given the action's context.
   String _plain(Object e) {
-    final s = e.toString();
-    final m = RegExp(r'message:\s*([^,)]+)').firstMatch(s);
-    final candidate = m?.group(1)?.trim();
-    if (candidate != null && candidate.isNotEmpty && !candidate.contains('Exception')) {
-      return candidate;
-    }
-    return 'Could not load the CEO data. Pull to retry.';
+    return AppFailureMapper.map(e, context: 'Could not load the CEO data')
+        .message;
   }
 
   @override

@@ -255,26 +255,50 @@ class _State extends State<ProviderProductFormScreen> {
       ));
       return;
     }
-    // Task 7: one-time document check before the first protected action.
-    // Providers upload their ID documents here (not at signup) — after
-    // their wallet recharge, exactly when they start selling.
-    final documentsOk =
-        await ProviderDocGate.instance.ensureDocuments(context);
-    if (!documentsOk) {
-      // The gate returns false when its sheet is dismissed with "Later", and
-      // this branch used to return silently too: the provider tapped SAVE,
-      // the dialog closed, and no listing and no photo were uploaded with no
-      // message at all. Nothing was saved, so say nothing was saved.
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text(
-          'Nothing was saved. Verify your identity to upload listings and '
-          'photos.',
-        ),
-        backgroundColor: AppTheme.error,
-        duration: Duration(seconds: 4),
-      ));
-      return;
+    // Task 7, narrowed by Part 1 of the registration rework (migration
+    // 20261014000001): document verification is VOLUNTARY for a
+    // SERVICE_PROVIDER and must not block posting a product. The only
+    // authority on whether documents block THIS provider is the server's own
+    // answer — provider_fulfilment_blockers(), the same function
+    // create_provider_product consults — so that is what is asked, instead of
+    // the sheet being shown unconditionally (which held every self-service
+    // provider at "Nothing was saved" for a document the server does not
+    // require). A VEHICLE_PROVIDER still gets the sheet exactly as before:
+    // the ride flow was deliberately untouched and the server still raises
+    // DOCUMENTS_UNVERIFIED for them. An unreadable answer fails OPEN, the
+    // same as ProviderDocGate always has — the create RPC still enforces the
+    // rule server-side and its refusal reaches showPublishBlockedDialog.
+    var documentsBlocked = false;
+    try {
+      final blockers = await Supabase.instance.client.rpc(
+        'provider_fulfilment_blockers',
+        params: {'p_provider_id': _providerId},
+      );
+      documentsBlocked = blockers is List &&
+          blockers.any((b) => b.toString() == 'DOCUMENTS_UNVERIFIED');
+    } catch (_) {
+      // Unreadable → treated as not blocked here; the server still decides.
+    }
+    if (documentsBlocked) {
+      final documentsOk =
+          await ProviderDocGate.instance.ensureDocuments(context);
+      if (!documentsOk) {
+        // The gate returns false when its sheet is dismissed with "Later",
+        // and this branch used to return silently too: the provider tapped
+        // SAVE, the dialog closed, and no listing and no photo were uploaded
+        // with no message at all. Nothing was saved, so say nothing was
+        // saved.
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text(
+            'Nothing was saved. Verify your identity to upload listings and '
+            'photos.',
+          ),
+          backgroundColor: AppTheme.error,
+          duration: Duration(seconds: 4),
+        ));
+        return;
+      }
     }
     // Block uploads until the one-time registration fee is paid.
     if (!_registrationFeePaid) {

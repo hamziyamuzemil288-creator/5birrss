@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../core/models/provider_gallery.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/services/favorites_service.dart';
+import '../../core/services/guest_session.dart';
 import '../../core/services/product_like_service.dart';
 import '../../core/services/review_service.dart';
 import '../../core/utils/category_field_value.dart';
@@ -472,14 +474,25 @@ class _State extends State<UserProviderDetailScreen> {
                 : const Icon(Icons.flag_outlined),
             onPressed: _reporting ? null : _openReport,
           ),
-          IconButton(
-            icon: Icon(_fav ? Icons.favorite : Icons.favorite_border,
-                color: _fav ? AppTheme.error : null),
-            onPressed: () async {
-              final now = await FavoritesService.instance
-                  .toggle('PROVIDER', widget.providerId);
-              if (mounted) setState(() => _fav = now);
-            },
+          // Wrapped in a Consumer (this screen is a plain StatefulWidget)
+          // so the heart can apply the guest rule the same way the product
+          // page does: a guest has no favourites to write to, so the tap
+          // opens the registration dialog instead of failing silently.
+          Consumer(
+            builder: (context, ref, _) => IconButton(
+              icon: Icon(_fav ? Icons.favorite : Icons.favorite_border,
+                  color: _fav ? AppTheme.error : null),
+              onPressed: () async {
+                if (ref.read(guestModeProvider)) {
+                  await requestAccountToContinue(context,
+                      action: 'save favourites to your account');
+                  return;
+                }
+                final now = await FavoritesService.instance
+                    .toggle('PROVIDER', widget.providerId);
+                if (mounted) setState(() => _fav = now);
+              },
+            ),
           ),
         ],
       ),
