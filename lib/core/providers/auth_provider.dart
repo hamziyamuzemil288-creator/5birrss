@@ -10,6 +10,7 @@ import '../models/models.dart';
 import '../resilience/app_failure.dart';
 import '../resilience/failure_mapper.dart';
 import '../services/supabase_service.dart';
+import '../services/notification_service.dart';
 import '../services/provider_presence_service.dart';
 import '../utils/friendly_error.dart';
 import '../utils/phone_formatter.dart';
@@ -364,6 +365,11 @@ class AuthNotifier extends StateNotifier<AuthState>
       } else {
         ProviderPresence.instance.stopHeartbeat();
       }
+
+      // Push: only once we are genuinely signed in with a loaded profile do we
+      // register this device's FCM token, so the sender can address it. Best
+      // effort — a push-registration failure must never fail a sign-in.
+      unawaited(NotificationService.instance.registerToken());
     } catch (e) {
       // Only apply error state if no newer load has taken over.
       if (seq != _profileLoadSeq) return;
@@ -482,6 +488,9 @@ class AuthNotifier extends StateNotifier<AuthState>
       // assignment below still closes the session for the router.
     }
     ProviderPresence.instance.stopHeartbeat();
+    // Best-effort: clear the local FCM token (the server row is reaped by the
+    // sender when FCM reports it unregistered; the session here is already dead).
+    unawaited(NotificationService.instance.removeToken());
     if (seq != _profileLoadSeq) return;
     state = const AuthState(
       isLoading: false,
@@ -809,6 +818,10 @@ class AuthNotifier extends StateNotifier<AuthState>
   /// Sign out.
   Future<void> signOut() async {
     ProviderPresence.instance.stopHeartbeat();
+    // Remove this device's push token WHILE the user is still signed in, so the
+    // fcm_tokens row is deleted rather than orphaned (the sender keeps addressing
+    // a row that still exists). See NotificationService.removeToken.
+    await NotificationService.instance.removeToken();
     await _svc.client.auth.signOut();
     state = const AuthState(isLoading: false);
   }

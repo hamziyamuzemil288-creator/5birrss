@@ -46,6 +46,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../app.dart';
 import 'resilience/failure_mapper.dart';
 import 'services/error_logger.dart';
+import 'services/notification_service.dart';
 import 'services/supabase_service.dart';
 import 'theme/app_theme.dart';
 import 'widgets/app_error_boundary.dart';
@@ -165,6 +166,10 @@ class _BootstrapState extends State<_Bootstrap> {
       // at a blank screen is worse than one reading "we could not start".
       await SupabaseService.init().timeout(const Duration(seconds: 10));
       if (mounted) setState(() => _isStarting = false);
+      // Push transport comes up AFTER the app shell, never on the critical
+      // path: a slow or unconfigured Firebase must not delay or break startup.
+      // Best-effort and self-guarding (see NotificationService.initialize).
+      unawaited(NotificationService.instance.initialize());
     } catch (e, st) {
       ErrorLogger.instance.logError(
         e,

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'routing/app_router.dart';
+import 'core/services/notification_service.dart';
 import 'core/theme/app_theme.dart';
 import 'core/widgets/app_update_gate.dart';
 import 'core/widgets/connectivity_banner.dart';
@@ -13,6 +14,11 @@ class Birr5App extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final router = ref.watch(appRouterProvider);
+
+    // Push deep-links navigate through the app's single GoRouter. Attaching it
+    // here (idempotent) lets NotificationService route a tapped push, and drains
+    // any deep link that cold-started the app before the router existed.
+    NotificationService.instance.attachRouter(router);
 
     return MaterialApp.router(
       title: 'Aliob',
