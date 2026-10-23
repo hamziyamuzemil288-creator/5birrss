@@ -56,9 +56,11 @@ class SupabaseService {
         eventsPerSecond: 2,
       ),
       // Session persistence goes to the OS secure store (Keystore/Keychain),
-      // not plaintext SharedPreferences. See secure_session_storage.dart.
+      // not plaintext SharedPreferences. In supabase_flutter 2.18.x the
+      // persisted session flows through LocalStorage, which is what
+      // SecureSessionStorage implements. See secure_session_storage.dart.
       authOptions: const FlutterAuthClientOptions(
-        asyncStorage: SecureSessionStorage(),
+        localStorage: SecureSessionStorage(),
       ),
     );
   }

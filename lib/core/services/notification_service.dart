@@ -174,7 +174,11 @@ class NotificationService {
           message.hashCode,
           notification.title ?? 'Aliob',
           notification.body ?? '',
-          const NotificationDetails(
+          // Not `const`: reading `.id`/`.name` off the const channel is not a
+          // constant expression, and re-spelling the strings here would let
+          // the channel this push is posted to drift from the one the client
+          // creates. The channel const stays the single source of truth.
+          NotificationDetails(
             android: AndroidNotificationDetails(
               kAliobNotificationChannel.id,
               kAliobNotificationChannel.name,

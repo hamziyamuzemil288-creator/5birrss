@@ -1,7 +1,7 @@
 name: birr5
 description: Aliob — location-based multi-sector marketplace and service platform.
 publish_to: 'none'
-version: 1.7.16+124
+version: 1.8.0+125
 environment:
   sdk: '>=3.3.0 <4.0.0'
 
@@ -38,7 +38,7 @@ dependencies:
   # Session tokens are persisted here, not in SharedPreferences: the access
   # and refresh tokens live in the Android Keystore / iOS Keychain. See
   # core/services/secure_session_storage.dart.
-  flutter_secure_storage: ^9.2.2
+  flutter_secure_storage: ^11.2.0
   # Push notifications (FCM transport only). Firebase is configured with
   # explicit FirebaseOptions from --dart-define (see core/config/env.dart), so
   # there is NO google-services.json and NO google-services Gradle plugin — a

@@ -53,6 +53,13 @@ const Set<String> expectedClientWrites = {
   // only, and RLS forces user_id = auth.uid().
   'client_error_logs',
   'favorites',
+  // The push client registers this device's FCM token here after sign-in and
+  // removes the row on sign-out (notification_service.dart). Genuinely
+  // client-written since 0007: fcm_tokens_owner_all is FOR ALL with
+  // user_id = auth.uid(), and no revocation has ever touched the table.
+  // Migration 20261023000001 adds it to the SQL expected list; leaving it out
+  // here reads the app's own token registration as a new writable hole.
+  'fcm_tokens',
   'notifications',
   'order_messages',
   'payment_methods',
@@ -171,13 +178,13 @@ void main() {
     // — the drift this test exists to catch, sitting inside the test itself.
     expect(
       expectedClientWrites.length,
-      24,
+      25,
       reason: 'expectedClientWrites changed size. If a table was added or '
           'removed, the expected list inside client_write_surface_report() in '
           'supabase/migrations/20260927000042_... must change to match, or the '
           'report will classify a table wrongly. The list was last restated in '
-          '20260927000065, which also restored that function''s existence '
-          'guard.',
+          '20261023000001 (fcm_tokens: the push client registers its device '
+          'token there), which also restated the function''s comment and grant.',
     );
   });
 }
