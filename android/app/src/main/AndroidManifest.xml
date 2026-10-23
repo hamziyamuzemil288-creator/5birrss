@@ -6,6 +6,10 @@
          the OS grants when fine is unavailable. -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+    <!-- Android 13+ (API 33) runtime notification permission. Declared here;
+         requested at runtime by firebase_messaging's requestPermission() in
+         core/services/notification_service.dart. Pre-33 installs ignore it. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <application
         android:label="Aliob"
         android:name="${applicationName}"

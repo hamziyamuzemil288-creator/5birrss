@@ -360,6 +360,19 @@ jobs:
         if: ${{ !inputs.dry_run }}
         run: supabase functions deploy password-reset-gateway
 
+      # FCM push sender (feat/fcm-notifications). Consumes the n8n_events row
+      # the notification enqueue trigger produces and delivers it over FCM
+      # HTTP v1. JWT verification stays ON deliberately: a Supabase Database
+      # Webhook invokes it with the service-role key (which satisfies the
+      # gateway), and the function additionally refuses any request without
+      # the shared x-dispatch-secret header, so the endpoint is never public.
+      # Its credentials (FIREBASE_SERVICE_ACCOUNT, FIREBASE_PROJECT_ID,
+      # NOTIFICATION_DISPATCH_SECRET) are Supabase secrets set manually — not
+      # from this workflow — so a missing JSON key cannot fail a deploy here.
+      - name: Deploy function fcm-dispatch
+        if: ${{ !inputs.dry_run }}
+        run: supabase functions deploy fcm-dispatch
+
       - name: Set Supabase function secrets
         if: ${{ !inputs.dry_run }}
         run: |

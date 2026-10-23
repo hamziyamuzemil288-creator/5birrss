@@ -39,6 +39,13 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   @override
   void initState() {
     super.initState();
+    // If the session ended on its own (expired and could not be refreshed), the
+    // auth layer left a one-time notice. Surface it so the user is told WHY
+    // they are looking at the login screen instead of being dropped onto it
+    // with no explanation. Read once (not watched): it is a landing message,
+    // and any later error replaces it through the normal _error path.
+    final notice = ref.read(authProvider).sessionNotice;
+    if (notice != null) _error = notice;
     // A lookup failure defaults to true (fail closed), matching the service.
     CaptchaService.instance.isRequired().then((required) {
       if (mounted) setState(() => _captchaRequired = required);
