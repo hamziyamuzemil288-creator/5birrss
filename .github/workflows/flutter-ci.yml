@@ -256,6 +256,35 @@ jobs:
           echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release-keystore.p12"
           echo "KEYSTORE_PATH=$RUNNER_TEMP/release-keystore.p12" >> "$GITHUB_ENV"
 
+      # Did THIS build actually receive the four FIREBASE_* dart-defines?
+      #
+      # The first post-merge build shipped with all four EMPTY: secrets added
+      # to the repo AFTER a run started are not in that run's context, and an
+      # empty --dart-define=FIREBASE_API_KEY= compiles just fine — push is
+      # simply off in the binary (Env.firebaseConfigured == false), with no
+      # build failure to say so. The only proof is a log line from the run
+      # itself, so this step prints the same verdict Env.firebaseConfigured
+      # computes at runtime — presence only. Values are never echoed (they
+      # are public Firebase app config, but a log is the wrong place for
+      # them, and GitHub would mask them mid-string anyway).
+      - name: Report firebaseConfigured (presence only, no values)
+        env:
+          FIREBASE_API_KEY: ${{ secrets.FIREBASE_API_KEY }}
+          FIREBASE_APP_ID: ${{ secrets.FIREBASE_APP_ID }}
+          FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.FIREBASE_MESSAGING_SENDER_ID }}
+          FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+        run: |
+          missing=""
+          for v in FIREBASE_API_KEY FIREBASE_APP_ID FIREBASE_MESSAGING_SENDER_ID FIREBASE_PROJECT_ID; do
+            if [ -z "${!v}" ]; then missing="$missing $v"; fi
+          done
+          if [ -z "$missing" ]; then
+            echo "firebaseConfigured=true (all 4 FIREBASE_* defines present; values not printed)"
+          else
+            echo "firebaseConfigured=false — missing/empty:$missing"
+            echo "::warning::Push will be OFF in this build: the FIREBASE_* secrets are absent from this run's context (check secret names Settings → Secrets and variables → Actions)."
+          fi
+
       - name: Build release app bundle
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -277,6 +306,45 @@ jobs:
         with:
           name: release-aab-${{ steps.app_version.outputs.version }}
           path: build/app/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
+          retention-days: 14
+
+      # === Signed release APK (sideload install) ===
+      #
+      # The AAB is what Play Console ingests; it cannot be installed on a
+      # phone. A release-signed APK is what you actually tap to install, and
+      # until now it was only produced by the dispatch-only Build Debug APK
+      # workflow (an UNSIGNED-keystore debug build, not the Play signing
+      # identity).
+      #
+      # This used to be two full builds (debug APK + release AAB) that ran
+      # the runner out of disk mid-R8 — but that was TWO VARIANTS (debug and
+      # release each compile, dex and R8 separately). This is the SAME
+      # release variant, so assembleRelease reuses bundleRelease's compiled
+      # classes, R8 output and dex: the incremental cost is packaging and
+      # native-lib merging, not a second full build. The disk reclaim step
+      # above still runs regardless.
+      - name: Build release APK
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          flutter build apk --release \
+            --dart-define=SUPABASE_URL=${{ secrets.SUPABASE_URL }} \
+            --dart-define=SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }} \
+            --dart-define=GOOGLE_MAPS_API_KEY=${{ secrets.GOOGLE_MAPS_API_KEY }} \
+            --dart-define=FIREBASE_API_KEY=${{ secrets.FIREBASE_API_KEY }} \
+            --dart-define=FIREBASE_APP_ID=${{ secrets.FIREBASE_APP_ID }} \
+            --dart-define=FIREBASE_MESSAGING_SENDER_ID=${{ secrets.FIREBASE_MESSAGING_SENDER_ID }} \
+            --dart-define=FIREBASE_PROJECT_ID=${{ secrets.FIREBASE_PROJECT_ID }}
+
+      - name: Upload release APK artifact
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-apk-${{ steps.app_version.outputs.version }}
+          path: build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
           retention-days: 14
 
