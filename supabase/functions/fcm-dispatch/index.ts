@@ -232,9 +232,54 @@ Deno.serve(async (req) => {
 
   // ---- Load the payload (tokens + message) --------------------------------
   const payload = (record.payload ?? {}) as Record<string, unknown>;
-  const tokens = Array.isArray(payload.tokens)
+  let tokens = Array.isArray(payload.tokens)
     ? (payload.tokens as unknown[]).map((t) => String(t)).filter((t) => t.length > 0)
     : [];
+
+  // The ONE batched event in this system (admin "Notify all users of release",
+  // APP_UPDATE_PUSH) carries a token_count and a batch_size but deliberately
+  // NOT the token list itself — so a sender that only reads payload.tokens
+  // claims the row, delivers to nobody, and reports "no tokens", which is a
+  // broadcast that silently never reaches a single device. Assemble the list
+  // here instead, from the same table the per-notification trigger reads.
+  // notification_preferences.push_enabled is honoured per recipient, for the
+  // same reason the trigger honours it: a stored preference that is not read
+  // is worse than no preference. Ordering and the cap mirror the trigger and
+  // the caller's batch_size (the in-app half of this broadcast is capped the
+  // same way), so push and inbox cover the same window.
+  if (tokens.length === 0 && payload.batched === true) {
+    const cap = Math.max(1, Math.min(Number(payload.batch_size) || 500, 5000));
+    const { data: rows, error } = await admin
+      .from("fcm_tokens")
+      .select("token, user_id")
+      // Same predicates the per-notification trigger uses, so a device that
+      // would be addressed by a normal push is addressed by the broadcast too
+      // (coalesce(is_active, true) / coalesce(token, '') <> '').
+      .or("is_active.eq.true,is_active.is.null")
+      .neq("token", "")
+      // Deterministic order, so a retried broadcast caps the SAME devices
+      // rather than a different subset.
+      .order("updated_at", { ascending: false, nullsFirst: false })
+      .order("token", { ascending: true })
+      .limit(cap);
+    if (error) {
+      await admin
+        .from("n8n_events")
+        .update({ status: "FAILED", last_error: error.message })
+        .eq("id", eventId);
+      return json({ error: "could not load broadcast tokens" }, 500);
+    }
+    const allowed = new Set<string>();
+    const { data: prefs } = await admin
+      .from("notification_preferences")
+      .select("user_id, push_enabled")
+      .eq("push_enabled", false);
+    const optedOut = new Set((prefs ?? []).map((p) => String(p.user_id)));
+    for (const row of rows ?? []) {
+      if (!optedOut.has(String(row.user_id))) allowed.add(String(row.token));
+    }
+    tokens = [...allowed];
+  }
 
   // An event with no device tokens (e.g. PROVIDER_APPROVED, which carries only
   // ids) has nothing to push to. It is still marked processed above.
