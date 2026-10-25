@@ -181,6 +181,11 @@ function norm(s: string): string {
     .replace(/\bso\s+much\s+thanks\b/g, "thanks")
     .replace(/\b(pleasse|plesae|plese)\b/g, "please")
     .replace(/\b(hep|hepl|heelp|halp)\b/g, "help")
+    // App-word typos that otherwise break the topic match entirely.
+    .replace(/\b(cancle|canel|cancell)\b/g, "cancel")
+    .replace(/\b(regsiter|reigster|regster|regiter)\b/g, "register")
+    .replace(/\b(uplod|uplaud|uplod)\b/g, "upload")
+    .replace(/\b(notificaton|notifcation|notificationn)s?\b/g, "notifications")
     .replace(/\b(whats|wat|whut|waht)\b/g, "what")
     // Chat shorthand.
     .replace(/\bhw\b/g, "how")
@@ -375,6 +380,58 @@ const FALLBACK_REPLY =
   "your submitted ticket. To add details or evidence, submit an appeal below and " +
   "it will be linked to your case. We're sorry for the wait.";
 
+// ── Quick-reply suggestions ──────────────────────────────────────────────
+// Rendered by the app as tappable chips under the reply. The lists are short
+// on purpose: a wall of buttons is a menu nobody reads, and the free-text box
+// is always there for anything not listed. Every suggestion is phrased as
+// something a PERSON would type, because tapping it sends it as their message.
+const MAIN_SUGGESTIONS = [
+  "What can you do?",
+  "How do I track my order?",
+  "How do payments work?",
+  "I need to talk to a person",
+];
+
+const FALLBACK_SUGGESTIONS = [
+  "How do I place an order?",
+  "How do I book a ride?",
+  "How does my wallet work?",
+  "How do I contact support?",
+];
+
+const HELP_SUGGESTIONS = [
+  "What is Aliob?",
+  "How do I sign up?",
+  "How do payments work?",
+  "How do I change my notification settings?",
+];
+
+// Shown when nothing matched. It is NOT the old "submit an appeal" wall: the
+// honest answer to an unparseable message is "I'm not sure yet — tell me a
+// little more", plus a way out to a human. Escalation stays reserved for
+// disputes and appeals, where the appeal form is actually the right door.
+const NOT_UNDERSTOOD_REPLY =
+  "Sorry, I'm not sure I understood that. Could you tell me a little more — " +
+  "for example what you were trying to do, or which screen you were on?\n\n" +
+  "Here are a few things I can help with right away. And if you'd rather have " +
+  "a person look at it, tap \"Submit an appeal\" below and our team will pick " +
+  "it up.";
+
+const APOLOGY_REPLY =
+  "I'm sorry — that sounds frustrating, and I'd like to help sort it out. " +
+  "Tell me what happened (an order, a payment, a ride, or your account) and " +
+  "I'll take you to the right place. If you'd prefer a person, I can send " +
+  "this to our team instead.";
+
+const HELP_REPLY =
+  "Of course — I'm here to help 🙂 Here's what I can do:\n\n" +
+  "• Explain how to sign up, sign in, or reset your password\n" +
+  "• Walk you through buying, booking, or ordering a ride\n" +
+  "• Explain fees, your wallet, and payments\n" +
+  "• Help with notifications, privacy, or reporting something\n" +
+  "• For providers: documents, listings, and staying active\n\n" +
+  "Just describe your question in your own words.";
+
 /** 10-hour no-response fallback: proactively hand out the direct contacts
  *  (once per ticket) when a user's submitted HELP_CHAT ticket has been OPEN
  *  with no admin response for 10+ hours. */
@@ -439,13 +496,16 @@ const INTENT_ROUTES: Record<string, { label: string; route: string }[]> = {
   signup: [],
   points: [],
   ratings: [],
-  support: [{ label: "My orders", route: "/user/orders" }],
+  // /user/orders is only a single order (/user/orders/:id). The orders LIST
+  // is tab 2 of the /user shell — the old path was filtered out by the app's
+  // known-route check, so the "My orders" chip never appeared at all.
+  support: [{ label: "My orders", route: "/user?tab=1" }],
   ticket: [],
   balance: [
     { label: "Open my Wallet", route: "/wallet" },
     { label: "Recharge my wallet", route: "/wallet/recharge" },
   ],
-  orders: [{ label: "My orders", route: "/user/orders" }],
+  orders: [{ label: "My orders", route: "/user?tab=1" }],
   ride_status: [{ label: "Book a ride", route: "/user/ride-request" }],
   subscription: [{ label: "Open my Wallet", route: "/wallet" }],
   greeting: [],
@@ -472,6 +532,10 @@ async function respond(
     intent?: string | null;
     // Optional override; defaults to INTENT_ROUTES[intent].
     links?: { label: string; route: string }[];
+    // Tappable quick replies the app renders under the bubble. Sent as text
+    // that is then submitted as the user's next message, so they must read
+    // like something a person would type.
+    suggestions?: string[];
   } = {},
 ): Promise<Response> {
   let logId = "";
@@ -494,6 +558,7 @@ async function respond(
     reply,
     handoff: opts.handoff === true,
     links: opts.links ?? ((opts.intent && INTENT_ROUTES[opts.intent]) || []),
+    suggestions: opts.suggestions ?? [],
     log_id: logId,
   });
 }
@@ -650,6 +715,15 @@ function isGreeting(text: string): boolean {
   return GREETING_RE.test(text.trim());
 }
 
+// "repeat that" / "say that again". Handled in the request because the answer
+// is the previous assistant turn, which only the request payload has.
+const REPEAT_RE =
+  /^(repeat|repeat\s+that|say\s+that\s+again|what\s+did\s+you\s+say|come\s+again|again\s+please|pardon|sorry\s+what)[\s!.,?]*$/;
+
+function isRepeatRequest(text: string): boolean {
+  return REPEAT_RE.test(text.trim());
+}
+
 // ── The greeting.
 //
 // This is not a hello. It is the only moment the assistant can save someone
@@ -711,7 +785,36 @@ const SMALL_TALK_POOLS: { re: RegExp; replies: string[] }[] = [
     replies: [CAPABILITIES_REPLY],
   },
   {
-    re: /^(thanks?|ty|appreciate\s*it|much\s+appreciated|appreciated|thanks?\s+again|no\s+worries|np|cheers|great|perfect|awesome|nice\s*one|well\s*done)[\s!,.]*$/,
+    // Apology and frustration. Deliberately anchored to the WHOLE message: a
+    // real complaint ("this is bad, my order never arrived") carries detail
+    // and must keep flowing to the ticket/escalation path instead of being
+    // answered with sympathy and no action.
+    re: /^(sorry|so\s+sorry|i\s*am\s+sorry|im\s+sorry|my\s+bad|apologies|apologise|i\s+apologize|this\s+is\s+(bad|terrible|awful|useless|rubbish|frustrating|unacceptable|not\s+good)|its\s+(bad|terrible|awful|useless)|that\s+is\s+(bad|terrible|awful|useless)|i\s*am\s+(angry|upset|frustrated|annoyed|disappointed|mad)|im\s+(angry|upset|frustrated|annoyed|disappointed|mad)|so\s+(angry|frustrated|annoyed)|very\s+(bad|disappointing)|worst\s+(app|service|experience)|not\s+good|this\s+sucks|unacceptable)[\s!.,?]*$/,
+    replies: [
+      APOLOGY_REPLY,
+      "I'm really sorry about that — let's get it fixed. Can you tell me a little " +
+        "more about what went wrong? If you'd rather speak to a person, the " +
+        "appeal form below goes straight to our team.",
+    ],
+  },
+  {
+    // Bare "help" / "I need a person". Answered with a menu instead of being
+    // pushed through retrieval and landing on an appeal form.
+    re: /^(help|help\s+me|i\s+need\s+help|need\s+help|can\s+you\s+help(\s+me)?|assist\s+me|i\s+need\s+(some\s+)?support|support|talk\s+to\s+(a\s+)?(human|person|agent)|human|agent|support\s+please)[\s!.,?]*$/,
+    replies: [HELP_REPLY],
+  },
+  {
+    // "Repeat that" with no history to repeat (a fresh conversation, or the
+    // server isolate changed). The handler echoes the real previous answer
+    // when it has one; this is the honest fallback.
+    re: /^(repeat|repeat\s+that|say\s+that\s+again|what\s+did\s+you\s+say|come\s+again|again\s+please|pardon|sorry\s+what)[\s!.,?]*$/,
+    replies: [
+      "Of course — could you tell me which part you'd like again? I can also " +
+        "start over: just ask me anything about Aliob.",
+    ],
+  },
+  {
+    re: /^(thanks?|ty|appreciate\s*it|much\s+appreciated|appreciated|thanks?\s+again|no\s+worries|np|cheers|great|perfect|awesome|nice\s*one|well\s*done|good\s*(job|work)|great\s*(job|work)|nice\s*(job|work)|excellent)[\s!,.]*$/,
     replies: [
       "You're very welcome! 😊 Anything else I can help with?",
       "Happy to help! Is there anything else?",
@@ -770,6 +873,188 @@ function smallTalkReply(userId: string, q: string): string | null {
 // Deliberately short, conversational, and honest — the FAQ doc holds the
 // long-form versions and remains the retrieval source of truth.
 const CANNED_TOPICS: { patterns: RegExp; reply: string }[] = [
+  // ── The questions a new user actually asks first ────────────────────────
+  // These sit ABOVE the flow topics on purpose: "how do I cancel my order"
+  // contains "order", so the generic buying answer would otherwise swallow it.
+  {
+    patterns:
+      /\b(what\s+is\s+aliob|what\s+is\s+this\s+app|what\s+does\s+aliob\s+do|about\s+aliob|what\s+can\s+i\s+do\s+(here|on\s+(this|the)\s+app)|what\s+is\s+(the\s+)?app\s+for|explain\s+aliob)\b/i,
+    reply:
+      "Aliob (All In One Business) is an Ethiopian marketplace app that brings " +
+      "shopping and services into one place.\n\n" +
+      "• Customers browse products and services near them, place orders, book " +
+      "services, and request rides.\n" +
+      "• Providers — shops, vehicle owners and service providers — list what " +
+      "they offer, answer availability questions, and manage orders from their " +
+      "dashboard.\n" +
+      "• Payments are made by transfer (bank or Telebirr) and the screenshot is " +
+      "verified before an order moves forward, so both sides are protected.\n\n" +
+      "You can chat with the provider inside the app, and the help chat you are " +
+      "using now can answer questions about any of it.",
+  },
+  {
+    patterns:
+      /\b(sign\s*in|log\s*in|login|forgot\s+(my\s+)?password|reset\s+(my\s+)?password|change\s+(my\s+)?password|password\s+(not\s+working|wrong|reset)|cant\s+(sign|log)\s*in|cannot\s+(sign|log)\s*in|locked\s+out|account\s+locked|cant\s+remember\s+my\s+password)\b/i,
+    reply:
+      "Signing in and passwords:\n\n" +
+      "• Sign in with the email and password you registered with, or tap " +
+      "Continue with Google if that is how you joined.\n" +
+      "• Forgot your password? Tap \"Forgot password\" on the sign-in screen and " +
+      "we'll email you a secure link to set a new one.\n" +
+      "• To change it while signed in: Profile → Change Password. You'll be " +
+      "asked for your current password first.\n" +
+      "• After several wrong attempts, sign-in pauses for a short while. Wait a " +
+      "few minutes and try again, then reset the password if it still fails.\n\n" +
+      "For your safety, never share your password or the reset link with anyone " +
+      "— including anyone claiming to be from Aliob.",
+  },
+  {
+    patterns:
+      /\b(cancel\s+(my\s+)?(order|booking|ride)|refunds?|money\s+back|order\s+status|status\s+of\s+my\s+order|track\s+(my\s+)?order|where\s+is\s+my\s+order|how\s+long\s+does\s+(an\s+)?order\s+take|order\s+stuck|order\s+not\s+moving)\b/i,
+    reply:
+      "Orders, cancellations and refunds:\n\n" +
+      "• Your order's status is shown in My Orders — tap the order to see its " +
+      "history, from payment verification through to completion.\n" +
+      "• You can cancel from the order screen while the order is still open. " +
+      "Once a payment is being verified, only our team can cancel it — use the " +
+      "help form and they will handle it.\n" +
+      "• If something is wrong with a delivered order, or you are owed money " +
+      "back, send it through the appeal form below. Refunds are decided case by " +
+      "case after the team reviews the order, and the outcome is sent to you in " +
+      "the app — I can't promise a fixed number of days.\n\n" +
+      "A provider who is not responding is worth reporting: the team can see the " +
+      "order and step in.",
+  },
+  {
+    patterns:
+      /\b(notifications?|notification\s+settings|push\s+(notification|message)|turn\s+(off|on)\s+notifications|stop\s+(the\s+)?notifications|unread|inbox|badge)\b/i,
+    reply:
+      "Notifications:\n\n" +
+      "• Important events (an order update, a payment verification, a ride, a " +
+      "document decision) arrive as a push notification and are saved in your " +
+      "in-app inbox, so you can look back at them later.\n" +
+      "• To change what you receive: Profile → Notification Settings. You can " +
+      "turn push on or off there; the SMS and email switches are saved for when " +
+      "those channels launch.\n" +
+      "• If Android asks for notification permission, allow it — without it the " +
+      "app cannot alert you, though your inbox still fills up.",
+  },
+  {
+    patterns:
+      /\b(privacy|is\s+(my|the)\s+(data|information)\s+safe|data\s+(safe|protection)|share\s+my\s+(phone|number|details)|who\s+can\s+see\s+my|terms\s+(and|&)\s+privacy|gdpr|delete\s+my\s+(data|account)|close\s+my\s+account)\b/i,
+    reply:
+      "Your privacy and safety:\n\n" +
+      "• Your ID document and payment screenshots are used to verify your " +
+      "account and orders, and are reviewed by our team — they are not shown to " +
+      "other users.\n" +
+      "• A provider's contact details and live location are shared with you only " +
+      "after your payment is confirmed, and location sharing for a ride ends " +
+      "when the ride does.\n" +
+      "• The full Terms & Privacy Policy is in Profile → About Aliob → Terms & " +
+      "Privacy Policy.\n" +
+      "• To close your account: Profile → Delete Account. It sends a request to " +
+      "our team, who process it — past orders are kept for accounting records.\n\n" +
+      "Never share your password, a one-time code, or your full ID number with " +
+      "anyone in chat — Aliob will never ask for them.",
+  },
+  {
+    patterns:
+      /\b(contact\s+(support|you|us|the\s+team)|talk\s+to\s+(a\s+)?(human|person|agent|someone)|human\s+(support|help)|customer\s+(service|support)|speak\s+to\s+(a\s+)?(person|human)|real\s+person|support\s+team)\b/i,
+    reply:
+      "Reaching a person:\n\n" +
+      "• The fastest route is the appeal form below — it reaches our team with " +
+      "your account attached, and you can add details and photos.\n" +
+      "• For an order or payment problem, keep the order number handy (it looks " +
+      "like Vh00012 or Fd00007); it helps the team find the case immediately.\n" +
+      "• Replies arrive in the app — as a notification and in your inbox — so " +
+      "you don't need to wait in this chat.\n\n" +
+      "Aliob support does not ask for your password, a one-time code, or your " +
+      "full ID number. If anyone does, stop and report it here.",
+  },
+  // ── Provider questions ──────────────────────────────────────────────────
+  {
+    patterns:
+      /\b(documents?|my\s+id|national\s+id|driving\s+licen[cs]e|trade\s+licen[cs]e|upload\s+(my\s+)?(id|document|licen[cs]e)|verif(y|ication)\s+(my\s+)?(account|document|id)|document\s+(approved|rejected)|kyc)\b/i,
+    reply:
+      "Documents and verification:\n\n" +
+      "• Upload your documents from your profile (the verification section), or " +
+      "when the app asks during sign-up.\n" +
+      "• A national ID is expected for every account. Vehicle providers also " +
+      "upload a driving licence; service providers a trading licence.\n" +
+      "• Our team reviews each document and you get a notification with the " +
+      "decision. If one is rejected, the message says why and you can upload a " +
+      "clearer copy.\n" +
+      "• While something is still pending, your dashboard tells you what is " +
+      "blocked and what you can already do.\n\n" +
+      "Take the photo in good light, with all four corners visible and no glare.",
+  },
+  {
+    patterns:
+      /\b(?:post|add|upload|create|list)\s+(?:a\s+|my\s+)?(?:product|listing|item|vehicle|service)|\bhow\s+do\s+i\s+(?:sell|list)\s+(?:a\s+)?(?:product|item|vehicle|service)|\bnew\s+listing|\bmanage\s+my\s+listings/i,
+    reply:
+      "Posting a listing:\n\n" +
+      "1. Open your provider dashboard and go to your products (or vehicles for " +
+      "ride providers).\n" +
+      "2. Tap Add New and fill in the name, category, price and description.\n" +
+      "3. Add clear photos — listings with a real photo are the ones buyers tap.\n" +
+      "4. Publish. You can hide or edit a listing at any time from the same " +
+      "screen.\n\n" +
+      "If publishing is blocked, the app tells you why on the dashboard: usually " +
+      "the account is not activated yet (the first recharge includes the " +
+      "one-time registration fee) or the wallet is empty, because fees are " +
+      "deducted from it.",
+  },
+  {
+    patterns:
+      /\b(get\s+(more\s+)?customers|more\s+(sales|orders|buyers)|stay\s+active|keep\s+my\s+account\s+active|why\s+am\s+i\s+not\s+getting\s+orders|no\s+orders|grow\s+my\s+business|subscription\s+lapsed)\b/i,
+    reply:
+      "Getting and keeping customers:\n\n" +
+      "• Answer availability requests quickly — a buyer asks before checkout, " +
+      "and the request expires if nobody replies, so a fast answer wins the " +
+      "sale.\n" +
+      "• Keep your wallet funded: the monthly subscription and order fees are " +
+      "deducted from it, and an empty wallet stops new orders being accepted.\n" +
+      "• Keep listings current — real photos, correct price, and hide what is " +
+      "out of stock.\n" +
+      "• Complete orders and collect ratings; the stars, completed sales and " +
+      "completion rate on your profile all come from real orders.\n\n" +
+      "If your account shows as suspended, the dashboard says what is needed to " +
+      "restore it.",
+  },
+  // ── Customer flows ──────────────────────────────────────────────────────
+  {
+    patterns:
+      /\b(deliver(y|ed)?|do\s+you\s+deliver|shipping|bring\s+it\s+to\s+me|courier)\b/i,
+    reply:
+      "Delivery:\n\n" +
+      "• Order from a provider as usual, then arrange delivery with them in the " +
+      "in-app chat — many providers deliver themselves.\n" +
+      "• The delivery cost depends on the provider and the distance, so it is " +
+      "confirmed with them (and shown before you confirm) rather than guessed " +
+      "here.\n" +
+      "• Once the order is paid and confirmed, the provider's contact details " +
+      "and location become available so the two of you can coordinate.\n\n" +
+      "If a delivery never arrives, report it from the order — the team can see " +
+      "the whole order and step in.",
+  },
+  // Rooms, services and appointments. The negative lookahead keeps "how do I
+  // book a RIDE" on the rides topic below: answering a ride question with the
+  // service-booking steps was a real mismatch.
+  {
+    patterns:
+      /^(?!.*\bride\b).*\b(book(ing)?\s+(a\s+)?(room|service|appointment|hotel|table|place)|reserv(e|ation)|how\s+do\s+i\s+book|book\s+(a\s+)?service|schedule\s+(a\s+)?(service|appointment))\b/i,
+    reply:
+      "Booking a service:\n\n" +
+      "1. Open the service or room you want and choose Buy/Book.\n" +
+      "2. If the provider needs to confirm availability, the app sends them your " +
+      "request and they answer in a short window — you'll see the answer right " +
+      "away.\n" +
+      "3. Continue to checkout, upload your payment screenshot, and the order " +
+      "moves forward once the payment is verified.\n\n" +
+      "The price is shown before you confirm, and every booking gets its own " +
+      "order number you can quote to support.",
+  },
+  // ── Existing flow topics ────────────────────────────────────────────────
   {
     patterns:
       /\b(sign\s*up|register|registration|create\s+(an?\s+)?(account|acct)|open\s+(an?\s+)?account|join\s+the\s+app|become\s+(a\s+)?(seller|provider|driver|user)|how\s+(do|can)\s+i\s+(sell|provide\s+rides)|get\s+started)\b/i,
@@ -938,9 +1223,37 @@ async function applyFeeFacts(reply: string): Promise<string> {
     .replaceAll("{{fee_min}}", String(facts.feeMin));
 }
 
-async function cannedReply(text: string): Promise<string | null> {
-  for (const t of CANNED_TOPICS) {
-    if (t.patterns.test(text)) return applyFeeFacts(t.reply);
+/// One extra sentence for people who are already providers.
+///
+/// The role is read from user_roles (loadProviderContext), not guessed from
+/// the wording, so it is right even when the question is a generic one. Kept
+/// short and only on the topics where the provider view genuinely differs.
+function providerTail(intent: string | null): string {
+  switch (intent) {
+    case "fees":
+    case "wallet_recharge":
+      return "\n\nAs a provider, Wallet on your dashboard is where you recharge — order " +
+        "fees and the monthly subscription are deducted from that balance.";
+    case "activation":
+    case "post_listing":
+      return "\n\nYour provider dashboard shows the activation state and exactly " +
+        "what is still needed before you can publish.";
+    case "stay_active":
+      return "\n\nYour dashboard brings the three things that matter into one " +
+        "place: availability requests, wallet balance, and listings.";
+    case "order_help":
+      return "\n\nAs a provider you can also see incoming orders and answer " +
+        "availability requests from your dashboard.";
+    default:
+      return "";
+  }
+}
+
+async function cannedReply(text: string, isProvider = false): Promise<string | null> {
+  for (let i = 0; i < CANNED_TOPICS.length; i++) {
+    if (!CANNED_TOPICS[i].patterns.test(text)) continue;
+    const base = await applyFeeFacts(CANNED_TOPICS[i].reply);
+    return isProvider ? base + providerTail(CANNED_NAMES[i] ?? null) : base;
   }
   return null;
 }
@@ -948,6 +1261,17 @@ async function cannedReply(text: string): Promise<string | null> {
 // Intent keys for chat_logs, aligned by index with CANNED_TOPICS above.
 // Keep both arrays in the same order.
 const CANNED_NAMES = [
+  "what_is_aliob",
+  "login",
+  "order_help",
+  "notifications",
+  "privacy",
+  "support",
+  "provider_docs",
+  "post_listing",
+  "stay_active",
+  "delivery",
+  "booking",
   "signup",
   "buying",
   "escrow",
@@ -1090,12 +1414,36 @@ Deno.serve(async (req) => {
     if (isGreeting(nq)) {
       return respond(user.id, pickReply(user.id, GREETING_REPLIES), {
         intent: "greeting",
+        suggestions: MAIN_SUGGESTIONS,
       });
+    }
+    // "repeat that" — echo the last assistant answer verbatim (the client
+    // sends the history, so the text is right here). Without history, the
+    // small-talk pool below asks which part, which is the honest answer.
+    if (isRepeatRequest(nq)) {
+      const lastAnswer = [...msgs]
+        .reverse()
+        .find((m: { role: string }) => m.role === "assistant")?.content;
+      if (lastAnswer) {
+        return respond(user.id, `Of course — here it is again:\n\n${lastAnswer}`, {
+          intent: "repeat",
+        });
+      }
     }
     if (!session) {
       const talk = smallTalkReply(user.id, nq);
       if (talk) {
-        return respond(user.id, talk, { intent: "smalltalk" });
+        const suggestions = talk === HELP_REPLY
+          ? HELP_SUGGESTIONS
+          : talk === CAPABILITIES_REPLY
+          ? MAIN_SUGGESTIONS
+          : talk === APOLOGY_REPLY
+          ? FALLBACK_SUGGESTIONS
+          : [];
+        return respond(user.id, talk, {
+          intent: "smalltalk",
+          suggestions,
+        });
       }
       // Appeal/spam-report intent AND dispute/scam/fraud/account/rider
       // shapes escalate straight to the Appeal Page (Task 14) — classified
@@ -1210,10 +1558,12 @@ Deno.serve(async (req) => {
     if (fallback) return respond(user.id, fallback, { handoff: true });
 
     // 4d. Fast path: canned answers for the app's core flows.
-    const canned = await cannedReply(nq);
+    const canned = await cannedReply(nq, providerCtx.isProvider);
     if (canned) {
       return respond(user.id, canned, {
         intent: cannedIntent(nq),
+        // Offer a few next steps instead of ending on a wall of text.
+        suggestions: MAIN_SUGGESTIONS,
       });
     }
 
@@ -1239,17 +1589,20 @@ Deno.serve(async (req) => {
       hits = await searchKeywords(nq, 6);
     }
     const answer = buildAnswer(question, hits);
-    return respond(
-      user.id,
-      answer.reply,
-      // Task 14: an unresolved retrieval miss escalates to the Appeal Page
-      // (in-app deep link), never to contact details.
-      {
-        handoff: answer.handoff,
-        intent: answer.handoff ? "appeal_general" : null,
-        links: answer.handoff ? INTENT_ROUTES.appeal_general : undefined,
-      },
-    );
+    if (answer.handoff) {
+      // A retrieval miss is NOT a dispute. Saying "submit an appeal" to
+      // "what's the weather" was cold and misleading; the honest answer is
+      // "I'm not sure yet, tell me more", with a clarification question, a
+      // few ready-made topics, and the appeal form still one tap away for
+      // anyone who would rather talk to a person.
+      return respond(user.id, NOT_UNDERSTOOD_REPLY, {
+        handoff: true,
+        intent: "fallback",
+        links: INTENT_ROUTES.appeal_general,
+        suggestions: FALLBACK_SUGGESTIONS,
+      });
+    }
+    return respond(user.id, answer.reply, { intent: null });
   } catch (e) {
     console.error("repo-chat failed:", e);
     // Task 14: even the crash path must not leak contacts — escalate to the
