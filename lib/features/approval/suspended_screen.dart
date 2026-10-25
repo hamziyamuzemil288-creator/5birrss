@@ -53,6 +53,36 @@ class _SuspendedView extends ConsumerStatefulWidget {
 class _SuspendedViewState extends ConsumerState<_SuspendedView> {
   bool _sendingTicket = false;
 
+  /// True when an administrator DELETED the business rather than suspending it
+  /// (provider_profiles.deleted_at, 20261025000002). The two states share
+  /// SUSPENDED because the enum has no DELETED member, but telling somebody
+  /// "your subscription likely lapsed" when their business was removed would
+  /// send them to recharge a wallet for a business that no longer exists.
+  bool _removed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _checkRemoved();
+  }
+
+  Future<void> _checkRemoved() async {
+    try {
+      final uid = Supabase.instance.client.auth.currentUser?.id;
+      if (uid == null) return;
+      final row = await Supabase.instance.client
+          .from('provider_profiles')
+          .select('deleted_at')
+          .eq('user_id', uid)
+          .maybeSingle();
+      if (mounted && row != null && row['deleted_at'] != null) {
+        setState(() => _removed = true);
+      }
+    } catch (_) {
+      // Best effort: the generic suspension copy still renders.
+    }
+  }
+
   /// Files a support_tickets row, which the admin panel already lists. Same
   /// mechanism the rejected screen uses, so there is one queue for "this
   /// account needs a human" rather than two.
@@ -128,7 +158,11 @@ class _SuspendedViewState extends ConsumerState<_SuspendedView> {
                   ),
                   const SizedBox(height: 20),
                   Text(
-                    inactive ? 'Account Deactivated' : 'Account Suspended',
+                    _removed
+                        ? 'Business account removed'
+                        : (inactive
+                            ? 'Account Deactivated'
+                            : 'Account Suspended'),
                     style: const TextStyle(
                         fontSize: 22,
                         fontWeight: FontWeight.w700,
@@ -138,9 +172,12 @@ class _SuspendedViewState extends ConsumerState<_SuspendedView> {
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    inactive
-                        ? 'This account is no longer active.'
-                        : 'Your access to Aliob is currently paused.',
+                    _removed
+                        ? 'An administrator removed this business from Aliob. '
+                            'Your past orders and receipts are unaffected.'
+                        : (inactive
+                            ? 'This account is no longer active.'
+                            : 'Your access to Aliob is currently paused.'),
                     textAlign: TextAlign.center,
                     style: TextStyle(
                         fontSize: 14,
