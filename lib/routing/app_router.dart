@@ -16,6 +16,7 @@ import '../features/auth/terms_policy_screen.dart';
 import '../features/auth/update_password_screen.dart';
 import '../features/user/user_dashboard.dart';
 import '../features/user/user_profile_screen.dart';
+import '../features/user/notification_settings_screen.dart';
 import '../features/user/user_notifications_screen.dart';
 import '../features/user/user_product_detail_screen.dart';
 import '../features/user/user_provider_detail_screen.dart';
@@ -443,6 +444,11 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             UserCategoryGroupScreen(group: s.pathParameters['group']!),
       ),
       GoRoute(path: '/user/favorites', builder: (_, __) => const UserFavoritesScreen()),
+      // The account screen's "Notification Settings" row used to answer
+      // `_notBuiltYet`; the switches it promised are these.
+      GoRoute(
+          path: '/user/notification-settings',
+          builder: (_, __) => const NotificationSettingsScreen()),
       GoRoute(path: '/user/cart', builder: (_, __) => const UserCartScreen()),
       GoRoute(path: '/user/checkout', builder: (_, s) => UserCheckoutScreen(providerId: s.extra as String)),
       // The payment step, reached from checkout once the fulfillment choice is

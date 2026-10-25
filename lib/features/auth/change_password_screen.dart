@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../core/services/security_notice_service.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/widgets/birr_text_field.dart';
 import '../../core/widgets/primary_button.dart';
@@ -77,6 +78,9 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
         setState(() => _error = _messageFor(data['error']?.toString()));
         return;
       }
+      // The password change is already committed; this notice is a courtesy and
+      // cannot fail the operation (see SecurityNoticeService).
+      await SecurityNoticeService.notePasswordChanged();
       if (!mounted) return;
       _currentCtrl.clear();
       _newCtrl.clear();

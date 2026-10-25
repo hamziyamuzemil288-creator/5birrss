@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../core/services/security_notice_service.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/providers/auth_provider.dart';
 import '../../core/utils/friendly_error.dart';
@@ -43,8 +44,11 @@ class _UpdatePasswordScreenState extends ConsumerState<UpdatePasswordScreen> {
     try {
       await Supabase.instance.client.auth
           .updateUser(UserAttributes(password: _passwordController.text));
-      // New credentials are live. Leave the recovery mode so the router
-      // resumes the normal flow (dashboard for the signed-in account).
+      // New credentials are live. Tell the account holder, so a change they
+      // did not make is something they can act on.
+      await SecurityNoticeService.notePasswordChanged();
+      // Leave the recovery mode so the router resumes the normal flow
+      // (dashboard for the signed-in account).
       if (!mounted) return;
       ref.read(authProvider.notifier).clearRecoveryFlag();
       if (!mounted) return;
