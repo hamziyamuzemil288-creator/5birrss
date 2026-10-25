@@ -281,16 +281,35 @@ GRANT EXECUTE ON FUNCTION public.assert_admin_delete_passes_the_client_guards()
   TO anon, authenticated;
 
 -- ---------------------------------------------------------------------------
--- 3. Deploy-time source check
+-- 3. The live assertion the connectivity suite calls
 -- ---------------------------------------------------------------------------
 --
--- Not the behaviour — a migration runs as `postgres`, where the guard is a
--- no-op (see the header). What this can still catch is a restatement that
--- drops one of the three branches, or the refusal itself, before it ever
--- reaches a device.
-DO $$
+-- WHY THE SOURCE CHECK IS NOT IN A DEPLOY-TIME DO BLOCK
+-- ------------------------------------------------------
+-- The first version of this migration inspected pg_proc.prosrc in a DO block
+-- at the end of the file, and the deploy failed on it: the block read the body
+-- the function had BEFORE this file replaced it (that body has
+-- is_server_write() and the refusal but no administrator branch — exactly the
+-- needle that tripped). A catalog read issued inside the same migration as the
+-- CREATE it is meant to inspect is not a reliable view of the result, and a
+-- deploy that fails on its own self-inspection is worse than one that verifies
+-- the property where it actually matters.
+--
+-- So the check lives HERE, as an assertion the live suite calls as a client,
+-- after the transaction has committed: it reads the guard a device will hit,
+-- it checks that the trigger on provider_profiles really calls this function
+-- (a guard nobody attached protects nothing), and it is exercised on every
+-- deploy by connectivity_test.dart next to the behavioural delete probe.
+CREATE OR REPLACE FUNCTION public.assert_provider_status_guard_trusts_administrators()
+RETURNS boolean
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
 DECLARE
   v_flat text;
+  v_attached int;
 BEGIN
   SELECT regexp_replace(lower(p.prosrc), E'\s+', ' ', 'g') INTO v_flat
     FROM pg_proc p
@@ -298,25 +317,93 @@ BEGIN
    WHERE n.nspname = 'public'
      AND p.proname = 'prevent_provider_self_privilege_escalation';
 
-  IF v_flat IS NULL
-     OR position('is_server_write' in v_flat) = 0
-     OR position('is_admin()' in v_flat) = 0
-     OR position('status_cannot_be_self_modified' in v_flat) = 0
-     OR position('current_user' in v_flat) > 0 THEN
+  IF v_flat IS NULL THEN
     RAISE EXCEPTION
-      '20261025000004: the provider status guard lost a branch (server '
-      'exemption, administrator exemption, or the refusal itself)';
+      'PROVIDER_GUARD: prevent_provider_self_privilege_escalation() is missing, '
+      'so nothing stops a provider changing their own status';
   END IF;
 
-  -- The other assertion that reads this guard, still satisfied.
+  -- The bug this migration fixes: without this branch, every client-called
+  -- admin RPC that moves provider_profiles.status (delete, suspend,
+  -- reinstate) is refused with STATUS_CANNOT_BE_SELF_MODIFIED.
+  IF position('is_admin()' in v_flat) = 0 THEN
+    RAISE EXCEPTION
+      'PROVIDER_GUARD: the guard has no administrator branch, so admin '
+      'delete/suspend/reinstate still roll back';
+  END IF;
+
+  -- The server exemption must go through the shared discriminator. Branching
+  -- on current_user is what made the 0030-era guards inert.
+  IF position('is_server_write' in v_flat) = 0
+     OR position('current_user' in v_flat) > 0 THEN
+    RAISE EXCEPTION
+      'PROVIDER_GUARD: the server exemption no longer consults '
+      'is_server_write(), or it branches on current_user again';
+  END IF;
+
+  -- And the refusal must still be there, or the branch was "fixed" by
+  -- allowing everything.
+  IF position('status_cannot_be_self_modified' in v_flat) = 0 THEN
+    RAISE EXCEPTION
+      'PROVIDER_GUARD: the refusal is gone, so a provider can change their own status';
+  END IF;
+
+  -- The documented resubmission transition, still permitted.
   IF position('old.status = ''rejected'' and new.status = ''pending_approval'''
               in v_flat) = 0 THEN
     RAISE EXCEPTION
-      '20261025000004: the REJECTED -> PENDING_APPROVAL resubmission exemption '
-      'disappeared from the provider status guard';
+      'PROVIDER_GUARD: the REJECTED -> PENDING_APPROVAL resubmission exemption '
+      'disappeared, so rejected providers cannot resubmit';
   END IF;
 
+  -- The guard must be the function the trigger actually calls.
+  SELECT count(*) INTO v_attached
+    FROM pg_trigger t
+    JOIN pg_proc p ON p.oid = t.tgfoid
+   WHERE t.tgrelid = 'public.provider_profiles'::regclass
+     AND NOT t.tgisinternal
+     AND p.proname = 'prevent_provider_self_privilege_escalation';
+
+  IF v_attached = 0 THEN
+    RAISE EXCEPTION
+      'PROVIDER_GUARD: no trigger on provider_profiles calls the guard, so '
+      'the administrator branch protects nothing';
+  END IF;
+
+  RETURN true;
+END;
+$$;
+
+COMMENT ON FUNCTION public.assert_provider_status_guard_trusts_administrators() IS
+  'True when the provider_profiles status guard exempts server writes and '
+  'verified administrators, still refuses every other status change, still '
+  'allows the REJECTED -> PENDING_APPROVAL resubmission, and is actually the '
+  'function the table trigger calls.';
+
+REVOKE ALL ON FUNCTION public.assert_provider_status_guard_trusts_administrators()
+  FROM public;
+GRANT EXECUTE ON FUNCTION public.assert_provider_status_guard_trusts_administrators()
+  TO anon, authenticated, service_role;
+
+-- ---------------------------------------------------------------------------
+-- 4. Self-check: only catalog facts that the following statements create, and
+--    no inspection of a body replaced above (see section 3).
+-- ---------------------------------------------------------------------------
+DO $$
+BEGIN
   IF to_regprocedure('public.assert_admin_delete_passes_the_client_guards()') IS NULL THEN
     RAISE EXCEPTION '20261025000004: the delete probe was not created';
+  END IF;
+
+  IF to_regprocedure('public.assert_provider_status_guard_trusts_administrators()') IS NULL THEN
+    RAISE EXCEPTION '20261025000004: the guard assertion was not created';
+  END IF;
+
+  IF NOT has_function_privilege(
+       'anon',
+       'public.assert_provider_status_guard_trusts_administrators()',
+       'EXECUTE') THEN
+    RAISE EXCEPTION
+      '20261025000004: the connectivity suite calls as anon and cannot run the guard assertion';
   END IF;
 END $$;

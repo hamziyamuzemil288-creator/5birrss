@@ -2629,6 +2629,20 @@ void main() {
               'admin, and suspend/reinstate with it — or the guard now lets a '
               'NON-administrator move provider_profiles.status, which is '
               'self-approval by another name.');
+
+      // The needle-level twin of the probe above, checked HERE and not by the
+      // migration inspecting its own freshly-replaced body: that self-check is
+      // what failed the first deploy, reading the pre-replacement text (it has
+      // is_server_write and the refusal, and no administrator branch). Live,
+      // after commit, this is the guard a device actually hits — and it also
+      // proves the trigger still calls it, because a guard nobody attached
+      // protects nothing.
+      expect(await ok('assert_provider_status_guard_trusts_administrators'),
+          isTrue,
+          reason: 'The provider status guard does not trust administrators, '
+              'branches on current_user again, lost its refusal, lost the '
+              'resubmission exemption, or is no longer the function the '
+              'provider_profiles trigger calls.');
     });
   });
 }
