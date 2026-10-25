@@ -40,6 +40,10 @@ function norm(s) {
     .replace(/\bso\s+much\s+thanks\b/g, "thanks")
     .replace(/\b(pleasse|plesae|plese)\b/g, "please")
     .replace(/\b(hep|hepl|heelp|halp)\b/g, "help")
+    .replace(/\b(cancle|canel|cancell)\b/g, "cancel")
+    .replace(/\b(regsiter|reigster|regster|regiter)\b/g, "register")
+    .replace(/\b(uplod|uplaud|uplod)\b/g, "upload")
+    .replace(/\b(notificaton|notifcation|notificationn)s?\b/g, "notifications")
     .replace(/\b(whats|wat|whut|waht)\b/g, "what")
     .replace(/\bhw\b/g, "how")
     .replace(/\br\b/g, "are")
@@ -66,6 +70,8 @@ function norm(s) {
 }
 
 const CAPABILITIES_REPLY = "I'm the Aliob assistant. Here's what I can help with.";
+const APOLOGY_REPLY = "I'm sorry — that sounds frustrating.";
+const HELP_REPLY = "Of course — here's what I can do.";
 
 const GREETING_RE =
   /^(hi|hii+|hello+|hay|hey+|hy|hallo|hiya|yo|selam|selamta|ሰላም|salam|hola|howdy|greetings|good\s+(morning|afternoon|evening|day)|whats?\s*up|what'?s\s*up|sup|how\s+(are|r)\s+(you|u)|how\s+are\s+you\s+doing|how\s+(are|is)\s+it\s+going|hows?\s+it\s+going|how'?s\s+it\s+going|nice\s+to\s+meet\s+you|good\s+to\s+see\s+you|good\s+(day|evening))[\s!.,?]*$/i;
@@ -80,7 +86,21 @@ const SMALL_TALK_POOLS = [
     replies: [CAPABILITIES_REPLY],
   },
   {
-    re: /^(thanks?|ty|appreciate\s*it|much\s+appreciated|appreciated|thanks?\s+again|no\s+worries|np|cheers|great|perfect|awesome|nice\s*one|well\s*done)[\s!,.]*$/,
+    // Apology / frustration — whole-message only, so a real complaint still
+    // reaches the ticket or escalation path.
+    re: /^(sorry|so\s+sorry|i\s*am\s+sorry|im\s+sorry|my\s+bad|apologies|apologise|i\s+apologize|this\s+is\s+(bad|terrible|awful|useless|rubbish|frustrating|unacceptable|not\s+good)|its\s+(bad|terrible|awful|useless)|that\s+is\s+(bad|terrible|awful|useless)|i\s*am\s+(angry|upset|frustrated|annoyed|disappointed|mad)|im\s+(angry|upset|frustrated|annoyed|disappointed|mad)|so\s+(angry|frustrated|annoyed)|very\s+(bad|disappointing)|worst\s+(app|service|experience)|not\s+good|this\s+sucks|unacceptable)[\s!.,?]*$/,
+    replies: [APOLOGY_REPLY],
+  },
+  {
+    re: /^(help|help\s+me|i\s+need\s+help|need\s+help|can\s+you\s+help(\s+me)?|assist\s+me|i\s+need\s+(some\s+)?support|support|talk\s+to\s+(a\s+)?(human|person|agent)|human|agent|support\s+please)[\s!.,?]*$/,
+    replies: [HELP_REPLY],
+  },
+  {
+    re: /^(repeat|repeat\s+that|say\s+that\s+again|what\s+did\s+you\s+say|come\s+again|again\s+please|pardon|sorry\s+what)[\s!.,?]*$/,
+    replies: ["Of course — which part would you like again?"],
+  },
+  {
+    re: /^(thanks?|ty|appreciate\s*it|much\s+appreciated|appreciated|thanks?\s+again|no\s+worries|np|cheers|great|perfect|awesome|nice\s*one|well\s*done|good\s*(job|work)|great\s*(job|work)|nice\s*(job|work)|excellent)[\s!,.]*$/,
     replies: ["You're very welcome! Anything else?"],
   },
   {
@@ -140,6 +160,25 @@ for (const input of [
   "sounds good", "bye bye", "tnx bye", "how do you work",
 ]) {
   check(`chatter warm: ${JSON.stringify(input)}`, warmReply(input) !== null);
+}
+
+// ── Friendliness: apology, help, repeat, praise ──────────────────────────
+for (const input of [
+  "sorry", "my bad", "this is bad", "this is frustrating", "I am angry",
+  "im upset", "worst app", "not good", "help", "help me", "i need help",
+  "can you help", "i need support", "repeat", "say that again", "pardon",
+  "good job", "well done", "great work", "nice work",
+]) {
+  check(`new chatter warm: ${JSON.stringify(input)}`, warmReply(input) !== null);
+}
+// The apology tier is anchored: a real complaint keeps its detail and must
+// keep flowing to the ticket/escalation path.
+for (const input of [
+  "this is bad, my order never arrived",
+  "i am angry because the driver took my money",
+  "help me with a refund for order Vh00012",
+]) {
+  check(`complaint is not swallowed: ${JSON.stringify(input)}`, warmReply(input) === null);
 }
 
 // Natural self-report and return-question variants.
@@ -250,6 +289,144 @@ const screenSource = readFileSync(
   new URL("../../lib/features/help_chat/help_chat_screen.dart", import.meta.url),
   "utf8",
 );
+// ── FAQ topics, read from the function itself ────────────────────────────
+// Instead of hand-mirroring twenty-one regexes (which is how a mirror drifts),
+// the topic list is extracted from the source and rebuilt as RegExp objects.
+// The reply length is measured from the string literals so an empty or
+// one-line FAQ answer fails here rather than in front of a user.
+const cannedStart = fnSource.indexOf("const CANNED_TOPICS");
+const cannedEnd = fnSource.indexOf("const CANNED_NAMES");
+// Start after the ARRAY OPENING, not at the declaration: the declaration line
+// itself reads `{ patterns: RegExp; reply: string }[] = [` and contains the
+// word this split keyed on, which produced a phantom first topic.
+const arrayOpen = fnSource.indexOf("= [", cannedStart);
+const cannedSrc = fnSource.slice(arrayOpen + 3, cannedEnd);
+check("CANNED_TOPICS is present", cannedStart > 0 && cannedEnd > cannedStart);
+
+const topics = cannedSrc
+  .split("patterns:")
+  .slice(1)
+  .map((chunk) => {
+    const reM = chunk.match(/^\s*\/((?:\\.|[^\/\\])*)\/([a-z]*)/);
+    const replyChunk = chunk.slice(chunk.indexOf("reply:"));
+    const literals = [...replyChunk.matchAll(/"((?:[^"\\]|\\.)*)"/g)]
+      .map((m) => m[1].replace(/\\n/g, " "));
+    return {
+      re: reM ? new RegExp(reM[1], reM[2]) : null,
+      length: literals.join(" ").length,
+    };
+  });
+
+check("every FAQ topic has a usable regex", topics.every((t) => t.re !== null));
+check(`FAQ topic count is 21 (found ${topics.length})`, topics.length === 21);
+
+// "No FAQ answer is empty or one line". 120 characters is roughly two short
+// sentences — below that the answer is a fact, not help.
+for (let i = 0; i < topics.length; i++) {
+  check(
+    `FAQ topic ${i} answer is substantial (${topics[i].length} chars)`,
+    topics[i].length >= 120,
+  );
+}
+
+const firstTopic = (input) => topics.findIndex((t) => t.re && t.re.test(norm(input)));
+
+const faqCases = [
+  ["what is aliob", 0],
+  ["what can i do here", 0],
+  ["how do i sign in", 1],
+  ["i forgot my password", 1],
+  ["how do i change my password", 1],
+  ["how do i cancel my order", 2],
+  ["how do refunds work", 2],
+  ["how do i track my order", 2],
+  ["how do i turn off notifications", 3],
+  ["where is my inbox", 3],
+  ["is my data safe", 4],
+  ["who can see my phone number", 4],
+  ["how do i contact support", 5],
+  ["how do i upload my documents", 6],
+  ["my id was rejected", 6],
+  ["how do i post a product", 7],
+  ["add a new listing", 7],
+  ["how do i get more customers", 8],
+  ["why am i not getting orders", 8],
+  ["do you deliver", 9],
+  ["how does delivery work", 9],
+  ["how do i book a service", 10],
+  ["can i make a reservation", 10],
+  ["how do i register", 11],
+  ["how do i recharge my wallet", 14],
+  ["what are the fees", 16],
+  ["how do i book a ride", 17],
+];
+for (const [input, expected] of faqCases) {
+  const got = firstTopic(input);
+  check(
+    `FAQ: ${JSON.stringify(input)} → topic ${expected} (got ${got})`,
+    got === expected,
+  );
+}
+
+// Typos still land on the right topic (norm() does the work).
+for (const [input, expected] of [
+  ["how do i cancle my order", 2],
+  ["how do i uplod my documents", 6],
+  ["how do i regsiter", 11],
+]) {
+  check(`FAQ typo: ${JSON.stringify(input)} → ${expected}`, firstTopic(input) === expected);
+}
+
+// ── Suggestions and the friendly fallback ────────────────────────────────
+const suggestionBlocks = ["MAIN_SUGGESTIONS", "FALLBACK_SUGGESTIONS", "HELP_SUGGESTIONS"];
+for (const name of suggestionBlocks) {
+  const at = fnSource.indexOf(`const ${name} = [`);
+  const end = fnSource.indexOf("];", at);
+  const items = [...fnSource.slice(at, end).matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  check(`${name} exists`, at > 0);
+  check(`${name} offers 3–4 quick replies (found ${items.length})`, items.length >= 3 && items.length <= 4);
+  check(`${name} items are tappable-length`, items.every((s) => s.length > 0 && s.length <= 80));
+}
+
+check(
+  "the fallback asks a clarifying question",
+  /NOT_UNDERSTOOD_REPLY[\s\S]{0,400}Could you tell me a little more/.test(fnSource) &&
+    fnSource.includes('NOT_UNDERSTOOD_REPLY ='),
+);
+check(
+  "the fallback still offers a human",
+  fnSource.includes('links: INTENT_ROUTES.appeal_general') &&
+    fnSource.includes('suggestions: FALLBACK_SUGGESTIONS'),
+);
+check(
+  "the fallback apologises rather than saying it does not understand",
+  !/NOT_UNDERSTOOD_REPLY =[\s\S]{0,200}I don't understand/.test(fnSource),
+);
+check(
+  "the client renders server suggestions as quick replies",
+  screenSource.includes("rawSuggestions") && screenSource.includes("options: suggestions"),
+);
+
+// ── Every link the bot offers must exist in the app ─────────────────────
+// The app drops any route not listed in chat_deep_links.dart, so a dead route
+// is silent: the chip simply never appears. `/user/orders` was exactly that
+// (only /user/orders/:id exists) and cost the "My orders" button entirely.
+const deepLinkSource = readFileSync(
+  new URL("../../lib/features/help_chat/chat_deep_links.dart", import.meta.url),
+  "utf8",
+);
+const knownRoutes = new Set(
+  [...deepLinkSource.matchAll(/ChatDeepLink\('[^']*',\s*'([^']+)'\)/g)].map((m) => m[1]),
+);
+const servedRoutes = [...fnSource.matchAll(/route:\s*"([^"]+)"/g)].map((m) => m[1]);
+for (const route of new Set(servedRoutes)) {
+  check(`bot link exists in the app: ${route}`, knownRoutes.has(route));
+}
+check(
+  "no bot link points at the orders table route that does not exist",
+  !servedRoutes.includes("/user/orders"),
+);
+
 for (const forbidden of ["wa.me", "muktarbiya329", "@gmail.com", "SUPPORT_PHONE", "SUPPORT_EMAIL", "SUPPORT_WHATSAPP", "mailto:"])
   check(`repo-chat has no contact leak: ${forbidden}`, !fnSource.includes(forbidden));
 for (const forbidden of ["0917686990", "wa.me", "muktarbiya329", "@gmail.com", "tel:", "mailto:", "WhatsApp"])

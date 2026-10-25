@@ -96,6 +96,7 @@ class _HelpChatScreenState extends State<HelpChatScreen> {
     bool handoff = false;
     String logId = '';
     var links = const <({String label, String route})>[];
+    var suggestions = const <String>[];
     try {
       // Skip the local greeting so history starts with a user turn.
       final history = _messages
@@ -109,6 +110,18 @@ class _HelpChatScreenState extends State<HelpChatScreen> {
           'Sorry, something went wrong. Please try again.';
       handoff = data?['handoff'] == true;
       logId = data?['log_id'] as String? ?? '';
+      // Quick replies from the server (greeting, help menu, fallback). The
+      // server decides WHICH questions are worth offering; this screen only
+      // checks that they are short, non-empty text a person could have typed.
+      final rawSuggestions = data?['suggestions'];
+      if (rawSuggestions is List) {
+        suggestions = rawSuggestions
+            .whereType<String>()
+            .map((s) => s.trim())
+            .where((s) => s.isNotEmpty && s.length <= 80)
+            .take(4)
+            .toList();
+      }
       final rawLinks = data?['links'];
       final knownRoutes = kKnownRoutes.map((k) => k.route).toSet();
       if (rawLinks is List) {
@@ -133,7 +146,10 @@ class _HelpChatScreenState extends State<HelpChatScreen> {
     if (!mounted) return;
     setState(() {
       _messages.add(_Msg('assistant', reply,
-          handoff: handoff, links: links, logId: logId));
+          handoff: handoff,
+          links: links,
+          options: suggestions,
+          logId: logId));
       _sending = false;
     });
     _scrollToEnd();

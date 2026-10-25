@@ -347,10 +347,12 @@ class AccountDashboard extends ConsumerWidget {
                   _menuTile(Icons.favorite_border, 'Favorites', AppTheme.error,
                       onTap: () => context.push('/user/favorites')),
                   _divider(),
+                  // This row used to answer "not built yet" while the table,
+                  // the columns and the push opt-out it promised all existed.
                   _menuTile(Icons.notifications_outlined,
                       'Notification Settings', AppTheme.info,
-                      onTap: () => _notBuiltYet(
-                          context, 'Notification Settings')),
+                      onTap: () =>
+                          context.push('/user/notification-settings')),
                   _divider(),
                   // GPS / ride tracking: live map + directions to the driver.
                   _menuTile(Icons.map_outlined, 'My Rides (Live Tracking)',

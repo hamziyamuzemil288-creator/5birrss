@@ -2508,4 +2508,34 @@ void main() {
       print('    account file sweep -> $detail');
     });
   });
+
+  group('listings and sign-ins are announced', () {
+    test('the listing and security notices are live', () async {
+      // The two notification classes that had no writer at all until
+      // 20261025000001: a listing published/hidden/removed, and the account's
+      // own new-device / password-changed notice. A trigger that is missing
+      // here is silence the product cannot recover from -- nobody reports a
+      // message they never expected to receive.
+      expect(await ok('assert_listing_and_security_notices_are_live'), isTrue,
+          reason: 'A listing can change visibility without telling its owner, '
+              'or a sign-in can happen without telling the account holder, or '
+              'security_events became client-writable so a caller could '
+              'suppress its own new-device notice.');
+    });
+  });
+
+  group('an administrator can delete a provider safely', () {
+    test('the delete is admin-only, refuses live work and audits itself',
+        () async {
+      // Reads the LIVE body of admin_delete_provider, so a later restatement
+      // that drops the admin check, the open-work refusal, the token removal
+      // or the audit row fails here rather than in production.
+      expect(await ok('assert_provider_admin_delete_is_guarded'), isTrue,
+          reason: 'admin_delete_provider is no longer guarded the way it was '
+              'written: it must check is_admin(), refuse while orders or rides '
+              'are still open, delete the device tokens, and write the audit '
+              'rows. The availability queue must also still notify admins on a '
+              'new request.');
+    });
+  });
 }

@@ -93,7 +93,7 @@ class _AdminLoginScreenState extends ConsumerState<AdminLoginScreen> {
                   children: [
                     BirrTextField(
                       label: 'Email',
-                      hint: 'admin@example.com',
+                      hint: 'Your admin email',
                       controller: _emailController,
                       keyboardType: TextInputType.emailAddress,
                       textInputAction: TextInputAction.next,

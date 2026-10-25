@@ -27,6 +27,11 @@ class _AdminDashboardState extends ConsumerState<AdminDashboard> {
   int _openDisputes = 0;
   int _pendingOrderPayments = 0;
 
+  /// Buyers waiting on a stock check right now. Counted by the server
+  /// (`pending_availability_request_count`) so the badge is the real queue,
+  /// not the first 300 rows the screen happens to have loaded.
+  int _pendingAvailability = 0;
+
   /// Identity documents waiting on a reviewer. Shown on the Document
   /// Verification card, and folded into the header badge so a queue nobody
   /// opens is still visible.
@@ -112,6 +117,10 @@ class _AdminDashboardState extends ConsumerState<AdminDashboard> {
       // non-reviewer sees 0 rather than a permission error, and a reviewer
       // sees their real queue.
       count(() async => await client.rpc('admin_pending_document_count')),
+      // Requests sitting in the availability queue. The card used to read
+      // "Pre-order stock checks" with no number at all, so the one queue with
+      // a 15-minute clock on it was also the one nothing pointed at.
+      count(() async => await client.rpc('pending_availability_request_count')),
     ]);
 
     // Section visibility for the signed-in principal (fail-open to '*' is
@@ -170,6 +179,7 @@ class _AdminDashboardState extends ConsumerState<AdminDashboard> {
         _openDisputes = results[8];
         _pendingOrderPayments = results[9];
         _pendingDocuments = results[10];
+        _pendingAvailability = results[11];
         _totalIncome = income;
         _loading = false;
       });
@@ -217,6 +227,9 @@ class _AdminDashboardState extends ConsumerState<AdminDashboard> {
     if (_openDisputes > 0) return '/admin/disputes';
     if (_pendingOrderPayments > 0) return '/admin/payments';
     if (_pendingRecharges > 0) return '/admin/payments';
+    // Last before the catch-all: an unanswered stock check expires in minutes,
+    // so it outranks nothing above it but should not be invisible either.
+    if (_pendingAvailability > 0) return '/admin/availability';
     return '/admin/approvals';
   }
 
@@ -239,7 +252,8 @@ class _AdminDashboardState extends ConsumerState<AdminDashboard> {
         _openDisputes +
         // Order payments sat OUTSIDE this sum while the bell routed to them:
         // the badge could read 0 with five payments waiting to be verified.
-        _pendingOrderPayments;
+        _pendingOrderPayments +
+        _pendingAvailability;
     final hasPending = pendingTotal > 0;
 
     return Scaffold(
@@ -717,7 +731,9 @@ class _AdminDashboardState extends ConsumerState<AdminDashboard> {
                           // queues, so the same permission gates it.
                           if (_can('registrations'))
                             _menuCard(Icons.schedule_outlined, 'Availability Requests',
-                                'Pre-order stock checks',
+                                _pendingAvailability > 0
+                                    ? '$_pendingAvailability awaiting an answer'
+                                    : 'Pre-order stock checks',
                                 () => context.push('/admin/availability')),
                           if (_can('admin_history'))
                             _menuCard(Icons.history_edu_outlined, 'Admin History', 'Full audit trail', () => context.push('/admin/history')),

@@ -12,6 +12,7 @@ import '../resilience/failure_mapper.dart';
 import '../services/supabase_service.dart';
 import '../services/notification_service.dart';
 import '../services/provider_presence_service.dart';
+import '../services/security_notice_service.dart';
 import '../utils/friendly_error.dart';
 import '../utils/phone_formatter.dart';
 
@@ -212,6 +213,17 @@ class AuthNotifier extends StateNotifier<AuthState>
 
       if (event == AuthChangeEvent.signedIn && session != null) {
         await _loadUserProfile(session.user);
+        // New-device sign-in notice (20261025000001). Fired here rather than in
+        // signIn() so the Google path is covered too, and skipped for an
+        // account created seconds ago — that person is getting the welcome,
+        // not a warning about themselves.
+        final created = DateTime.tryParse(session.user.createdAt ?? '');
+        final fresh = created != null &&
+            DateTime.now().toUtc().difference(created.toUtc()).inMinutes < 5;
+        if (!fresh) {
+          // Best effort: cannot fail the login (see SecurityNoticeService).
+          await SecurityNoticeService.noteLogin();
+        }
       } else if (event == AuthChangeEvent.signedOut) {
         state = const AuthState(isLoading: false);
       } else if (event == AuthChangeEvent.tokenRefreshed && session != null) {
