@@ -4,6 +4,30 @@ All notable changes to Aliob (All In One Business). The version name and
 versionCode here match `pubspec.yaml`'s `version:` line and
 `lib/core/app_build.dart` (pinned by `test/forced_update_gate_test.dart`).
 
+## 1.9.1+128 — 2026-10-25
+
+### Admin
+
+- Fixed "Could not delete this provider. Something went wrong." — the
+  provider-status guard refused every administrator status write (the same
+  wall that blocked suspend/reinstate), so the delete rolled back with no
+  usable message. Migration `20261025000004` lets an admin's write reach the
+  row, keeps the guard against self-approval for providers, and adds a live
+  probe that deletes a real provider through the PostgREST path in CI.
+- Delete refusals now say what actually happened: open orders/rides with the
+  counts, already deleted, cannot delete yourself, and status changes are
+  server-managed. The raw server error and a `Ref AL-…` code are logged for
+  admins instead of a bare fallback.
+
+### Notifications
+
+- Migration `20261025000005` measures delivery live instead of assuming it:
+  it re-arms the outbox drain if the schedule row vanished, flushes the
+  queued backlog into real inboxes at deploy time, and adds a report the
+  connectivity suite reads on every deploy (queue depth/age, last drain run
+  and its error, what reached the inbox, push tokens and n8n_events
+  consumption).
+
 ## 1.9.0+127 — 2026-10-25
 
 Release-readiness pass for the production rollout (closed testing completed).

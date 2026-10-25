@@ -1378,6 +1378,79 @@ void main() {
               'notification nobody ever sees.');
     });
 
+    // The test above proves the wiring exists; this one proves DELIVERY. The
+    // two things the user actually reports — a signup welcome and an
+    // availability request that never show up for anyone — are both
+    // CLIENT-path notifications, so both wait in notification_outbox for the
+    // pg_cron drain. A dead drain leaves them there forever while every
+    // declarative assertion above stays green, and from inside the app an
+    // inbox with a dead drain and an inbox with nothing to say are the same
+    // screen. The report carries the measurement for each real failure mode:
+    // queue stuck, events never queued, inbox fine but no push tokens, and
+    // push rows nobody consumes (the Database Webhook step).
+    test('a notification actually reaches a real inbox (live delivery)',
+        () async {
+      final (report, error) = await rpcTextDiagnosed(
+          'notification_delivery_report');
+      expect(report, isNotNull,
+          reason: 'The delivery report could not be read at all, so nothing '
+              'verified that notifications reach an inbox. Diagnostic: '
+              '$error');
+
+      final metrics = <String, String>{};
+      for (final line in report!.split('\n')) {
+        final i = line.indexOf('=');
+        if (i > 1) metrics[line.substring(0, i).trim()] = line.substring(i + 1).trim();
+      }
+      // ignore: avoid_print
+      print('    delivery queue -> drain=${metrics['drain_job']} '
+          'pending=${metrics['outbox_pending']} '
+          'oldest=${metrics['outbox_oldest_pending_seconds']}s '
+          'last=${metrics['drain_last_status']}@'
+          '${metrics['drain_last_age_seconds']}s '
+          'err=${metrics['drain_last_error']}');
+      // ignore: avoid_print
+      print('    delivery inbox -> total=${metrics['notifications_total']} '
+          'week=${metrics['notifications_7d']} '
+          'welcome=${metrics['signup_welcome_rows']} '
+          'availability=${metrics['availability_mentions']} '
+          'latest=${metrics['notification_latest_age_seconds']}s ago');
+      // ignore: avoid_print
+      print('    delivery push  -> week=${metrics['push_events_7d']} '
+          'pending=${metrics['push_events_pending']} '
+          'sent=${metrics['push_events_sent']} '
+          'failed=${metrics['push_events_failed']} '
+          'tokens=${metrics['active_fcm_tokens']}'
+          '/${metrics['fcm_tokens_total']} '
+          'triggers=${metrics['n8n_event_triggers']} '
+          'hooks=${metrics['supabase_hooks_total']}');
+
+      // A function the deploy has not applied yet is the documented tolerance,
+      // not a verdict about delivery — skip the health checks for it.
+      if (report.startsWith('PENDING DEPLOY')) return;
+
+      expect(metrics['drain_job'], 'active',
+          reason: 'The outbox drain is '
+              '${metrics['drain_job']} on the live database, so every '
+              'client-path notification (signup welcome, availability '
+              'requests, order events) queues forever and the inbox shows '
+              'nothing. Full report:\n$report');
+      expect(metrics['drain_last_status'], isNot('failed'),
+          reason: 'The last drain run FAILED, which strands every queued '
+              'notification: ${metrics['drain_last_error']}');
+
+      final pending = int.tryParse(metrics['outbox_pending'] ?? '') ?? -1;
+      final oldest =
+          int.tryParse(metrics['outbox_oldest_pending_seconds'] ?? '') ?? -1;
+      expect(pending >= 0 && oldest >= 0, isTrue,
+          reason: 'The report did not carry queue numbers:\n$report');
+      expect(pending == 0 || oldest < 900, isTrue,
+          reason: '$pending notification(s) have been queued for '
+              '${oldest}s. The drain runs every minute, so anything past 15 '
+              'minutes means users are not seeing notifications that were '
+              'written for them. Full report:\n$report');
+    });
+
     test('every award path is wired and the ledger is the source of truth',
         () async {
       // The award triggers are the whole feature: without them a completed
@@ -2536,6 +2609,26 @@ void main() {
               'are still open, delete the device tokens, and write the audit '
               'rows. The availability queue must also still notify admins on a '
               'new request.');
+    });
+
+    test('the delete completes through the client status guard', () async {
+      // 20261025000004. The RPC is called with the administrator's own JWT, so
+      // is_server_write() is false — SECURITY DEFINER changes current_user,
+      // never session_user — and the BEFORE UPDATE guard on provider_profiles
+      // had no branch for an administrator. It raised
+      // STATUS_CANNOT_BE_SELF_MODIFIED on the final UPDATE, rolled the whole
+      // delete back, and the screen said "Something went wrong". Suspend and
+      // reinstate from Content Control died on the same line.
+      //
+      // This drives the real call as a real client, which is the only context
+      // in which that guard is engaged at all: a probe run inside a migration
+      // connects as postgres and would pass without testing anything.
+      expect(await ok('assert_admin_delete_passes_the_client_guards'), isTrue,
+          reason: 'Either admin_delete_provider still cannot complete when an '
+              'administrator calls it — so Delete does nothing for every '
+              'admin, and suspend/reinstate with it — or the guard now lets a '
+              'NON-administrator move provider_profiles.status, which is '
+              'self-approval by another name.');
     });
   });
 }

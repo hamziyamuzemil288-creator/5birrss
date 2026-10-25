@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../core/theme/app_theme.dart';
+import '../../core/services/error_logger.dart';
 import '../../core/services/points_service.dart';
 import '../../core/utils/friendly_error.dart';
 
@@ -452,14 +453,30 @@ class _State extends State<AdminProviderManagementScreen> {
             '$hidden listing${hidden == 1 ? '' : 's'} hidden.'),
       ));
       await _load();
-    } catch (e) {
+    } catch (e, st) {
       reasonCtrl.dispose();
       if (!mounted) return;
-      final message = friendlyError(e, context: 'Could not delete this provider');
+      // The sentence alone is not enough. A refusal the mapper does not know
+      // renders as "Something went wrong", which is how the delete's real
+      // answer — STATUS_CANNOT_BE_SELF_MODIFIED, from a guard that had no
+      // branch for an administrator — reached this screen as a shrug and was
+      // reported as "the system is there but delete does not work".
+      //
+      // So: the raw error goes to the error table (searchable by support),
+      // and the admin sees the server's own code beside the sentence.
+      final ref = ErrorLogger.instance.logError(
+        e,
+        st,
+        source: 'rpc',
+        context: 'admin_delete_provider',
+        details: {'provider_id': id},
+      );
+      final message =
+          friendlyErrorWithCode(e, context: 'Could not delete this provider');
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(message),
+        content: Text(ref == null ? message : '$message (Ref $ref)'),
         backgroundColor: AppTheme.error,
-        duration: const Duration(seconds: 6),
+        duration: const Duration(seconds: 8),
       ));
     }
   }
