@@ -68,6 +68,49 @@ void main() {
       expect(message, isNot(contains('NO_SUCH_IMAGE')));
     });
   });
+
+  // Every refusal admin_delete_provider can raise, and none of them may come
+  // back as "Something went wrong". That is exactly how the delete looked
+  // broken: the server answered STATUS_CANNOT_BE_SELF_MODIFIED (from a guard
+  // that had no branch for an administrator, fixed by 20261025000004), the
+  // mapper knew none of these sentinels, and the screen showed a shrug — so
+  // the report was "the system is there but delete does not work".
+  group('provider deletion refusals read as instructions, not as crashes', () {
+    const fallback = 'Something went wrong. Please try again.';
+
+    test('open work is counted out of the server\'s own measurement', () {
+      final message = friendlyError(
+          'PostgrestException(message: PROVIDER_HAS_OPEN_WORK orders=2 '
+          'rides=1, code: P0001, details: null, hint: null)',
+          context: 'Could not delete this provider');
+      expect(message, isNot(contains(fallback)));
+      expect(message, contains('2 open orders'));
+      expect(message, contains('1 open ride'));
+      expect(message.toLowerCase(), contains('nothing was deleted'));
+    });
+
+    test('a malformed count still yields a sentence, never the fallback', () {
+      final message = friendlyError('PROVIDER_HAS_OPEN_WORK',
+          context: 'Could not delete this provider');
+      expect(message, isNot(contains(fallback)));
+      expect(message, isNotEmpty);
+    });
+
+    test('deleting twice says so instead of failing vaguely', () {
+      expect(friendlyError('PROVIDER_ALREADY_DELETED'),
+          contains('already been removed'));
+    });
+
+    test('deleting your own business names the actual rule', () {
+      expect(friendlyError('CANNOT_DELETE_SELF'), contains('your own business'));
+    });
+
+    test('the status guard points at the administrator account', () {
+      final message = friendlyError('STATUS_CANNOT_BE_SELF_MODIFIED');
+      expect(message, isNot(contains(fallback)));
+      expect(message.toLowerCase(), contains('administrator'));
+    });
+  });
 }
 
 /// A thrown object whose toString() is pure prose — the transport failures.

@@ -476,6 +476,45 @@ String friendlyError(Object error, {String? context}) {
   ])) {
     // Malformed data from the backend. The user did nothing wrong.
     message = 'We received an unexpected response. Please try again.';
+  }
+  // ── Administrator: removing a business (admin_delete_provider) ──
+  //
+  // Refusals an administrator can act on, which until now all fell through to
+  // "Something went wrong" — a delete blocked by live orders read as a crash
+  // rather than as an instruction, and that is exactly how it was reported.
+  // The counts come out of PROVIDER_HAS_OPEN_WORK orders=N rides=M, which is
+  // the same measurement the refusal used, so the screen cannot disagree with
+  // the server about how much work is open.
+  else if (_any(lower, ['provider_has_open_work'])) {
+    final match = RegExp(r'orders=(\d+)\s+rides=(\d+)').firstMatch(raw);
+    final orders = int.tryParse(match?.group(1) ?? '') ?? 0;
+    final rides = int.tryParse(match?.group(2) ?? '') ?? 0;
+    final open = <String>[
+      if (orders > 0) '$orders open order${orders == 1 ? '' : 's'}',
+      if (rides > 0) '$rides open ride${rides == 1 ? '' : 's'}',
+    ];
+    message = open.isEmpty
+        ? 'Nothing was deleted: this business still has open work. Finish '
+            'or cancel it first.'
+        : 'Nothing was deleted: this business still has ${open.join(' and ')} '
+            '— finish or cancel that work first, so a customer is never left '
+            'waiting on a business that no longer answers.';
+  } else if (_any(lower, ['provider_already_deleted'])) {
+    message = 'This business has already been removed — there is nothing '
+        'left to delete.';
+  } else if (_any(lower, ['cannot_delete_self'])) {
+    message = 'You cannot remove your own business from this screen. Another '
+        'administrator has to do it.';
+  } else if (_any(lower, [
+    'status_cannot_be_self_modified',
+    'profile_status_cannot_be_self_modified',
+  ])) {
+    // Since 20261025000004 an administrator passes this guard, so reaching it
+    // means the call did not arrive as an administrator at all. Say that
+    // rather than blaming the tap.
+    message = 'That approval status could not be changed from this account. '
+        'Sign in with a full administrator account — if it keeps happening, '
+        'send the reference code to support.';
   } else {
     message = _fallback;
   }

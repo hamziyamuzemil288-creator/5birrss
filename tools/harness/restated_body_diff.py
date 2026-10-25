@@ -267,6 +267,30 @@ CASES: list[tuple[str, str, str, tuple[str, ...]]] = [
             "array_to_string(v_blockers, ','); END IF; END IF;",
         ),
     ),
+    # The provider status guard gained the middle caller 20260927000028's own
+    # header says every guard on a table the server writes needs: server,
+    # verified privileged client, everybody else. It gave that branch to the
+    # wallet guard and the profiles guard in the same file and missed this
+    # one, so `admin_delete_provider` — called with the administrator's own
+    # JWT, therefore not a server write — raised STATUS_CANNOT_BE_SELF_MODIFIED
+    # on its final UPDATE and rolled the whole delete back. Content Control's
+    # suspend/reinstate died on the same line.
+    #
+    # A pure addition: nothing from 00028 was dropped, so the superset
+    # assertion is the right one. The approved block reads backwards because
+    # the body now contains four `RETURN new;` lines and difflib pairs the
+    # original's one with the LAST of them -- so the three lines it counts as
+    # added are `RETURN new; END IF; IF public.is_admin() THEN`, which is the
+    # whole branch minus its own return. No original line is dropped either
+    # way, which is the property this case exists to hold.
+    (
+        "prevent_provider_self_privilege_escalation",
+        "20260927000028",
+        "20261025000004",
+        (
+            "RETURN new; END IF; IF public.is_admin() THEN",
+        ),
+    ),
 ]
 
 
