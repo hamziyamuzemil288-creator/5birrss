@@ -77,11 +77,29 @@ SET search_path = public, pg_temp;
 ALTER TABLE public.orders
   ADD COLUMN IF NOT EXISTS delivery_dest_lat double precision,
   ADD COLUMN IF NOT EXISTS delivery_dest_lng double precision,
-  ADD COLUMN IF NOT EXISTS delivery_driver_provider_id uuid
-    REFERENCES public.provider_profiles(id),
   ADD COLUMN IF NOT EXISTS delivery_status text,
   ADD COLUMN IF NOT EXISTS delivery_arrived_at timestamptz,
   ADD COLUMN IF NOT EXISTS delivery_confirmed_at timestamptz;
+
+-- The driver, in its own statement, for two reasons that are both load-
+-- bearing:
+--
+--   * ON DELETE SET NULL, not the default. Account deletion reaches
+--     provider_profiles through the cascade, and a NO ACTION key here would
+--     take `DELETE FROM auth.users` down with 23503 AFTER the request was
+--     already marked APPROVED — the exact defect 20260927000118 fixed for
+--     nineteen other columns, and the one the harness's "no foreign key
+--     refuses the account deletion" check reads straight off this clause. A
+--     driver whose account is closed simply stops being the assigned driver,
+--     which is also the honest state: the order keeps its history, the admin
+--     can assign somebody else.
+--   * attribution: the harness reads a `REFERENCES` as belonging to the
+--     FIRST column of a multi-column ADD COLUMN clause, so inlining this
+--     key into the statement above would record it against
+--     delivery_dest_lat and leave the real column unchecked.
+ALTER TABLE public.orders
+  ADD COLUMN IF NOT EXISTS delivery_driver_provider_id uuid
+    REFERENCES public.provider_profiles(id) ON DELETE SET NULL;
 
 -- A delivery has one of three states or none at all. The CHECK is here so a
 -- typo cannot become a state nobody's screen has ever heard of.
