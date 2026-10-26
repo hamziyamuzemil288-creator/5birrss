@@ -100,13 +100,13 @@ class FeeResolver {
     'approve_wallet_recharge': 'fee_activation',
     'calculate_booking_fee_at': 'calculate_booking_fee_at',
     'create_provider_product': 'fee_product_listing_fee',
-    // Part 10: the delivery fee a buyer is quoted at checkout and the fee the
-    // `order-create` Edge Function adds to the order total are the same number
-    // because both read THIS one function. It prices through
-    // calculate_fare_estimate_at — the reader create_ride_request charges a
-    // ride with — and applies the markup products.display_price is generated
-    // from, so a delivery is the ride fare plus the product markup and not a
-    // second formula.
+    // Part 10: the delivery price a buyer is quoted at checkout and the price
+    // the `order-create` Edge Function adds to the order total are the same
+    // number because both read THIS one function. It resolves the provider's
+    // own point, measures the distance and prices it delivery_base_fee +
+    // fee_ride_per_km(vehicle, city) x distance_km — the platform's own two
+    // stores — and refuses BEYOND_MAX_DISTANCE past max_delivery_distance_km.
+    // No arithmetic happens in Dart or in the Edge Function.
     'order-create (delivery fee)': 'quote_delivery_fee',
   };
 

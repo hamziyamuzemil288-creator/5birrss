@@ -1,12 +1,15 @@
-// Part 10: the delivery fee REUSES the ride fare — proven from the repository,
-// not asserted in a comment.
+// Part 10: the delivery price has exactly ONE rule, quoted once and charged
+// once — proven from the repository, not asserted in a comment.
 //
 // What this guards against is the quiet failure the repo has already been
-// bitten by twice: a second copy of a pricing rule. If the delivery fee ever
-// stops calling `calculate_fare_estimate_at` and starts carrying its own
-// base + per-km arithmetic, the delivery quoted at checkout and the delivery
-// the order is priced with drift apart the first time an admin edits a rate —
-// and nothing crashes, so nothing notices.
+// bitten by twice: a second copy of a pricing rule. The rule itself changed in
+// 20261026000001 (delivery = delivery_base_fee + fee_ride_per_km x distance,
+// capped by max_delivery_distance_km); what did NOT change is the shape. If
+// the checkout, the Edge Function or the Dart resolver ever starts carrying
+// its own arithmetic — or the server's two halves stop reading the same
+// stores — the price shown at checkout and the price the order is charged
+// drift apart the first time an admin edits a rate, and nothing crashes, so
+// nothing notices.
 //
 // So it reads the deployed bodies (the LAST definition in deploy order, which
 // is what a full deploy leaves live), the column definition PostgreSQL will
@@ -58,6 +61,24 @@ String read(String path) {
   return f.readAsStringSync();
 }
 
+/// A function body with its `--` comments removed.
+///
+/// The forbidden-shape assertions below are about CODE, and this project's SQL
+/// documents itself by naming the very functions it must not call — a body
+/// comment that explains "the same great-circle measure
+/// calculate_fare_estimate_at prices on" would otherwise fail a check that the
+/// function no longer calls it.
+String bodyCode(String name) {
+  final body = latestFunctionBody(name);
+  return body
+      .split('\n')
+      .map((l) {
+        final i = l.indexOf('--');
+        return i >= 0 ? l.substring(0, i) : l;
+      })
+      .join('\n');
+}
+
 /// The same source with comment-only lines removed, so a docstring that NAMES a
 /// forbidden pattern (fee_resolver.dart's own header explains why it must not
 /// divide by 100) is not mistaken for the pattern in code.
@@ -72,37 +93,52 @@ String readCode(String path) {
 }
 
 void main() {
-  test('the delivery fee is the ride fare, not a second formula', () {
-    final delivery = latestFunctionBody('calculate_delivery_fee_at');
+  test('the delivery price is base fee + per-km x distance, read not computed',
+      () {
+    final delivery = bodyCode('calculate_delivery_fee_at');
+    expect(
+      delivery.contains('delivery_base_fee') &&
+          delivery.contains('fee_ride_per_km'),
+      isTrue,
+      reason: 'calculate_delivery_fee_at must price from the platform\'s own '
+          'stores — the CEO delivery base fee and the vehicle category\'s '
+          'per-km rate — or a second copy of the rule exists to drift.',
+    );
     expect(
       delivery.contains('calculate_fare_estimate_at'),
-      isTrue,
-      reason: 'calculate_delivery_fee_at must price through '
-          'calculate_fare_estimate_at — the reader create_ride_request charges '
-          'a ride with. Carrying its own base + per_km arithmetic here is the '
-          'duplication this test exists to catch.',
+      isFalse,
+      reason: 'the delivery price must not borrow the ride fare any more: the '
+          'rule is base_fee + per-km x distance, with no ride floor and no '
+          'product markup.',
     );
     expect(
       delivery.contains('platform_display_markup'),
-      isTrue,
-      reason: 'the delivery fee must apply the platform markup the product '
-          'price is generated from, not a copy of it',
+      isFalse,
+      reason: 'the product markup is not part of the delivery price any more; '
+          'carrying it here would quietly raise every delivery above the '
+          'quoted number',
     );
   });
 
-  test('the buyer is quoted from the same function the order is priced with',
+  test('the buyer is quoted from the same function the order is charged with',
       () {
-    final quote = latestFunctionBody('quote_delivery_fee');
+    final quote = bodyCode('quote_delivery_fee');
     expect(
-      quote.contains('calculate_fare_estimate_at'),
+      quote.contains('delivery_base_fee') && quote.contains('fee_ride_per_km'),
       isTrue,
-      reason: 'quote_delivery_fee must price through the shared fare reader, '
-          'or the checkout shows one number and the order charges another',
+      reason: 'quote_delivery_fee must price through the same two readers '
+          'calculate_delivery_fee_at uses, or the checkout shows one number '
+          'and the order charges another',
     );
+    // The cap lives in the callable BOTH halves read, so a checkout cannot
+    // offer a delivery the charge would refuse — and vice versa.
     expect(
-      quote.contains('platform_display_markup'),
+      quote.contains('max_delivery_distance_km') &&
+          quote.contains('BEYOND_MAX_DISTANCE'),
       isTrue,
-      reason: 'the quote must include the same markup the charge does',
+      reason: 'the maximum delivery distance must be enforced inside the '
+          'quote, with its own stated reason, or a too-far delivery is priced '
+          'as though it were ordinary',
     );
     // And it must NOT invent a fee when it cannot measure one.
     expect(
@@ -110,6 +146,24 @@ void main() {
       isTrue,
       reason: 'a provider with no published point must be reported as '
           'unpriceable, not priced from the city',
+    );
+  });
+
+  test('the CEO can reach the delivery settings from the fee catalogue', () {
+    final catalogue = latestFunctionBody('admin_fee_catalogue');
+    expect(
+      catalogue.contains('delivery_base_fee') &&
+          catalogue.contains('max_delivery_distance_km'),
+      isTrue,
+      reason: 'a fee with no door is a fee nobody can change: the DELIVERY '
+          'group must be listed by admin_fee_catalogue(), which is what the '
+          'settings screen renders',
+    );
+    expect(
+      latestFunctionBody('is_fee_key').contains('max_delivery_distance_km'),
+      isTrue,
+      reason: 'the distance cap must count as a fee, or it is editable by any '
+          'admin instead of the CEO and carries no bounds check',
     );
   });
 

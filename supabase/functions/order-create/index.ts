@@ -261,16 +261,22 @@ Deno.serve(async (req: Request) => {
       return json({ error: "Delivery requires an address" }, 400);
     }
 
-    // ── Part 10: the delivery fee ──
+    // ── the delivery price ──
     //
     // Priced by quote_delivery_fee — the SAME reader the buyer's checkout
     // quoted with (FeeResolver.deliveryFee). That function resolves the
     // provider's own registered point, measures the distance to the buyer's
-    // point, prices it through calculate_fare_estimate_at (the fare
-    // create_ride_request charges a ride with) and applies the platform
-    // markup products.display_price is generated from. No arithmetic happens
-    // here, which is the point: a second copy of the pricing rule is what
-    // makes a quoted fee and a charged fee differ.
+    // point and prices it delivery_base_fee + fee_ride_per_km(vehicle, city)
+    // x distance_km. No arithmetic happens here, which is the point: a second
+    // copy of the pricing rule is what makes a quoted price and a charged
+    // price differ.
+    //
+    // The CAP is the one refusal this function must not soften. Past
+    // max_delivery_distance_km the quote comes back ok=false with
+    // BEYOND_MAX_DISTANCE, and the checkout has already bounced the buyer to
+    // self-pickup — but a client that ignores that must not be handed a free
+    // delivery at the product price, so the order is refused outright with the
+    // server's own sentence.
     //
     // A fee is added ONLY when the server could price this delivery. When it
     // could not — the provider has published no point, or the buyer sent no
@@ -306,7 +312,8 @@ Deno.serve(async (req: Request) => {
           ok?: boolean;
           fee?: unknown;
           distance_km?: unknown;
-          reason?: unknown;
+          reason?: string;
+          message?: string;
         };
         const fee = Number(q.fee);
         if (q.ok === true && Number.isFinite(fee) && fee >= 0) {
@@ -315,6 +322,18 @@ Deno.serve(async (req: Request) => {
             `Delivery fee: ${deliveryFee.toFixed(2)}` +
             (body.vehicle_category_id ? ` (vehicle ${body.vehicle_category_id})` : "") +
             (q.distance_km != null ? `, ${q.distance_km} km` : "");
+        } else if (q.reason === "BEYOND_MAX_DISTANCE") {
+          // Delivered as a refusal, not a warning: a delivery too far away is
+          // not a delivery this platform sells.
+          const beyond = q.message;
+          return json(
+            {
+              error:
+                beyond ??
+                "This delivery is beyond the maximum delivery distance. Choose self-pickup instead.",
+            },
+            400,
+          );
         } else {
           console.warn(
             "order-create: delivery could not be priced",

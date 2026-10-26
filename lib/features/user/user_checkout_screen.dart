@@ -69,6 +69,17 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
   bool _deliveryQuoting = false;
   bool _deliveryFlowRunning = false;
 
+  /// Set when the SERVER refused the delivery for being past
+  /// `max_delivery_distance_km`. Delivery is then not offered at all: the card
+  /// explains why and the basket stays on self-pickup, which is the other
+  /// option the server will still take. Never decided here — the refusal comes
+  /// back as `BEYOND_MAX_DISTANCE` from the same quote that prices the trip.
+  bool _deliveryBeyondMax = false;
+
+  /// The server's own sentence for [_deliveryBeyondMax], shown verbatim so the
+  /// number it names (the distance and the cap) is the one the server measured.
+  String? _deliveryRefusal;
+
   /// The delivery fee actually added to the total: zero unless the server
   /// priced this delivery. A failed or unpriceable quote contributes NOTHING
   /// rather than an invented number.
@@ -385,6 +396,15 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
       _deliveryPlaceLabel = chosen.label;
       _deliveryQuote = null;
     });
+    // The map point IS the delivery location, so it seeds the address line
+    // when the buyer has not typed one: the server still requires an address
+    // ("Delivery requires an address"), and asking for the same thing twice —
+    // once on the map, once in a text field — is how a working delivery step
+    // looks like it is stuck. A buyer who already wrote their own keeps it.
+    if (_addressCtrl.text.trim().isEmpty &&
+        chosen.label.trim().isNotEmpty) {
+      _addressCtrl.text = chosen.label.trim();
+    }
     await _requoteDelivery();
   }
 
@@ -402,9 +422,22 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
       vehicleCategoryId: _deliveryVehicleId,
     );
     if (!mounted) return;
+
+    // Past the cap the server refuses instead of pricing. Delivery stops being
+    // an option on the spot — the basket falls back to self-pickup and the
+    // card says why — rather than leaving a delivery selected with no price
+    // the server will accept at submission.
+    final beyondMax =
+        !quote.ok && quote.reason == 'BEYOND_MAX_DISTANCE';
     setState(() {
       _deliveryQuote = quote;
       _deliveryQuoting = false;
+      _deliveryBeyondMax = beyondMax;
+      _deliveryRefusal = beyondMax ? quote.message : null;
+      if (beyondMax && _fulfillmentMode == 'DELIVERY') {
+        _fulfillmentMode = 'SELF_PICKUP';
+        _fulfillmentTouched = true;
+      }
     });
   }
 
@@ -495,14 +528,22 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
                     style: TextStyle(fontSize: 12.5)),
               ],
             )
-          else if (quote != null && quote.hasValue)
+          else if (quote != null && quote.hasValue) ...[
             Text(
               'Distance ${quote.distanceKm?.toStringAsFixed(2) ?? '—'} km · '
               'delivery fee ${quote.fee!.toStringAsFixed(2)} $currency '
-              '(ride rate for '
-              '${_deliveryVehicleName ?? 'this vehicle'} + platform markup)',
+              '(${_deliveryVehicleName ?? 'this vehicle'} rate)',
               style: const TextStyle(fontSize: 12.5, height: 1.35),
-            )
+            ),
+            const SizedBox(height: 4),
+            // The exact wording the buyer must see under every quoted price.
+            const Text(
+              'This is a default estimate — the actual price may vary '
+              'depending on your exact location.',
+              style: TextStyle(
+                  fontSize: 11.5, height: 1.4, color: AppTheme.textMuted),
+            ),
+          ]
           else if (quote != null && !quote.ok)
             // The server refused to price it and said why. Shown as the
             // server's own sentence rather than a made-up number — a
@@ -769,6 +810,22 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
                                   : 'Brought to your address',
                               selected: _fulfillmentMode == 'DELIVERY',
                               onTap: () {
+                                // The server refused this delivery as too far:
+                                // delivery is simply not on offer, and the
+                                // reason is shown beside the choice rather than
+                                // re-opened as a flow that ends in the same
+                                // refusal.
+                                if (_deliveryBeyondMax) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text(_deliveryRefusal ??
+                                          'Delivery is not available this far '
+                                              'away. Choose self-pickup '
+                                              'instead.'),
+                                    ),
+                                  );
+                                  return;
+                                }
                                 setState(() {
                                   _fulfillmentTouched = true;
                                   _fulfillmentMode = 'DELIVERY';
@@ -803,6 +860,40 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
                         ],
                       ),
                       const SizedBox(height: 16),
+                      // Delivery refused as too far: said once, in full, right
+                      // under the two choices — the number in it is the one
+                      // the server measured, so the buyer can see WHY the
+                      // delivery card bounced them rather than guessing.
+                      if (_deliveryBeyondMax) ...[
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: AppTheme.gold.withOpacity(0.08),
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(
+                                color: AppTheme.gold.withOpacity(0.45)),
+                          ),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Icon(Icons.route_outlined,
+                                  size: 18, color: AppTheme.gold),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  _deliveryRefusal ??
+                                      'Delivery is not available this far '
+                                          'away. Choose self-pickup instead.',
+                                  style: const TextStyle(
+                                      fontSize: 12.5, height: 1.45),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                      ],
                       if (_fulfillmentMode == 'DELIVERY') ...[
                         const Text('Delivery Details',
                             style: TextStyle(
