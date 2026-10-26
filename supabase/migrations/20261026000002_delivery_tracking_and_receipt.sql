@@ -939,7 +939,7 @@ BEGIN
   --    reason; this now matches it.
   SELECT regexp_replace(lower(pg_get_functiondef(
            'public.transition_order_status(uuid, order_status, uuid, text)'::regprocedure
-         )), E'\s+', ' ', 'g')
+         )), E'\\s+', ' ', 'g')
     INTO v_whitelist;
 
   -- Every OTHER definition of that name. Not an assertion — the migration's
@@ -981,7 +981,7 @@ BEGIN
   END IF;
 
   -- 5. Arrival is the reveal, and it is written where the reveal reads it.
-  SELECT regexp_replace(lower(p.prosrc), E'\s+', ' ', 'g') INTO v_arrived
+  SELECT regexp_replace(lower(p.prosrc), E'\\s+', ' ', 'g') INTO v_arrived
     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
    WHERE n.nspname = 'public' AND p.proname = 'delivery_mark_arrived';
 
