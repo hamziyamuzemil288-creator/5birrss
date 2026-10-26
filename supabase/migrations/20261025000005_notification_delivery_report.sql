@@ -282,10 +282,10 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.notification_delivery_report() IS
-  'Read-only live report of the notification pipeline: queue depth and age, '\
-  'drain schedule state and last run result, what reached notifications, and '\
-  'the push leg (tokens, n8n_events consumption, webhook trigger). One '\
-  'key=value metric per line. Never raises: the caller decides which numbers '\
+  'Read-only live report of the notification pipeline: queue depth and age, '
+  'drain schedule state and last run result, what reached notifications, and '
+  'the push leg (tokens, n8n_events consumption, webhook trigger). One '
+  'key=value metric per line. Never raises: the caller decides which numbers '
   'are findings.';
 
 REVOKE ALL ON FUNCTION public.notification_delivery_report() FROM PUBLIC;
