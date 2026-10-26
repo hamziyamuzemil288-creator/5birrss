@@ -355,6 +355,14 @@ class _VehicleProviderDashboardState
                                   () => context.push('/vehicle/map')),
                               _action(Icons.local_taxi_outlined, 'Ride Requests',
                                   () => context.push('/vehicle/ride-requests')),
+                              // Deliveries an admin assigned to this driver:
+                              // the arrival button and the buyer's released
+                              // number live there. Separate from Ride Requests
+                              // because a delivery is an `orders` row with its
+                              // own state machine, not a claimable ride.
+                              _action(Icons.local_shipping_outlined,
+                                  'Delivery Jobs',
+                                  () => context.push('/vehicle/delivery-jobs')),
                               _action(Icons.play_circle_outline, 'Active Trip',
                                   () => context.push('/vehicle/trip')),
                               _action(Icons.history, 'Ride History',

@@ -384,6 +384,29 @@ Deno.serve(async (req: Request) => {
       return json({ error: sanitizeError(rpcError.message) }, 400);
     }
 
+    // ── WHERE this delivery goes ──
+    //
+    // The point above was a PRICING input; this is the order's own record of
+    // the destination. Without it the driver has no drop-off to navigate to
+    // and the buyer's tracking screen has no pin — and the address line on its
+    // own is a street name, not a coordinate. Stored by the server (service
+    // role) rather than added to create_order_secure's signature, which every
+    // assertion in the repository pins. A failure here is logged and leaves
+    // the order standing: the delivery address text is already on the order.
+    const createdId = (created as { id?: string } | null)?.id;
+    if (createdId && fulfillmentMode === "DELIVERY" && hasBuyerPoint) {
+      const { error: destError } = await admin
+        .from("orders")
+        .update({ delivery_dest_lat: lat, delivery_dest_lng: lng })
+        .eq("id", createdId);
+      if (destError) {
+        console.error(
+          "order-create: delivery destination was not stored",
+          destError,
+        );
+      }
+    }
+
     return json(
       {
         order: created,

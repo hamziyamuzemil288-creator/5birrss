@@ -29,6 +29,7 @@ import '../features/user/user_checkout_screen.dart';
 import '../features/user/user_payment_screen.dart';
 import '../features/user/user_availability_screen.dart';
 import '../features/user/user_order_detail_screen.dart';
+import '../features/user/user_delivery_tracking_screen.dart';
 import '../features/user/provider_order_waiting_screen.dart';
 import '../features/user/user_search_screen.dart';
 import '../features/user/live_map_screen.dart';
@@ -100,6 +101,7 @@ import '../features/approval/pending_approval_screen.dart';
 import '../features/approval/rejected_screen.dart';
 import '../features/approval/suspended_screen.dart';
 import '../features/vehicle/driver_ride_requests_screen.dart';
+import '../features/vehicle/driver_delivery_jobs_screen.dart';
 import '../features/vehicle/driver_trip_screen.dart';
 import '../features/user/user_ride_request_screen.dart';
 import '../features/user/user_active_ride_screen.dart';
@@ -484,6 +486,14 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         },
       ),
       GoRoute(path: '/user/orders/:id', builder: (_, s) => UserOrderDetailScreen(orderId: s.pathParameters['id']!, viewerRole: s.extra as String? ?? 'user')),
+      // The buyer's delivery, live. Reached from the order's own screen; the
+      // RPC behind it re-checks buyer/driver/admin and the escrow window, so
+      // the route itself grants nothing.
+      GoRoute(
+        path: '/user/orders/:id/delivery',
+        builder: (_, s) =>
+            DeliveryTrackingScreen(orderId: s.pathParameters['id']!),
+      ),
       GoRoute(
         path: '/review/new',
         builder: (_, s) {
@@ -599,6 +609,11 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       GoRoute(path: '/vehicle/vehicles/new', builder: (_, __) => const VehicleFormScreen()),
       GoRoute(path: '/vehicle/vehicles/:id', builder: (_, s) => VehicleFormScreen(vehicleId: s.pathParameters['id'])),
       GoRoute(path: '/vehicle/ride-requests', builder: (_, __) => const DriverRideRequestsScreen()),
+      // Assigned deliveries: where the driver presses "I am here" and reads
+      // the buyer's number the arrival releases.
+      GoRoute(
+          path: '/vehicle/delivery-jobs',
+          builder: (_, __) => const DriverDeliveryJobsScreen()),
       // No :id parameter — DriverTripScreen resolves the driver's active ride
       // itself via RideService.getMyActiveDriverRide(). The route previously
       // declared `:id`, but both call sites (driver_ride_requests_screen and

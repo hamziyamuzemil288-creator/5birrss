@@ -558,6 +558,27 @@ class _UserOrderDetailScreenState
   bool _escrowRevealedFor(String? status) =>
       status == 'APPROVED' || status == 'STARTED';
 
+  /// The buyer chose delivery, not self-pickup. Written once by
+  /// create_order_secure and never changed afterwards, so the row itself is
+  /// the authority — this screen never re-derives it from the items.
+  bool get _isDeliveryOrder =>
+      (_order?['fulfillment_mode'] as String?) == 'DELIVERY';
+
+  /// The buyer's door into the live tracking screen. Exactly the window
+  /// `get_delivery_tracking` accepts (buyer side of an APPROVED/STARTED
+  /// delivery): before payment is verified there is nothing to reveal, and
+  /// after COMPLETED there is nothing moving. Self-pickup orders and the
+  /// provider's own view of somebody else's order are out — the RPC would
+  /// refuse both, so the button is never shown to offer a dead end.
+  bool get _deliveryTrackable =>
+      !_isProvider && _isDeliveryOrder && _deliveryRevealed;
+
+  /// Delivery state as the order carries it (ASSIGNED / ARRIVED / DELIVERED),
+  /// defaulting the way the database defaults it for orders placed before the
+  /// delivery state machine existed.
+  String get _deliveryState =>
+      (_order?['delivery_status'] as String?) ?? 'ASSIGNED';
+
   /// Where the buyer collects a self-pickup order, read once the escrow
   /// releases it. Best-effort by design, like every read on this screen: a
   /// provider who never set a point, or a failed read, leaves this null and
@@ -1095,6 +1116,15 @@ class _UserOrderDetailScreenState
                           _locationCard(),
                           const SizedBox(height: 16),
                         ],
+                        // The delivery's own screen: the assigned driver moving
+                        // on the map, the arrival, and the receipt button. Only
+                        // for the buyer, only inside the escrow window — the
+                        // two conditions `_deliveryTrackable` states, which are
+                        // the same two the RPC behind the screen enforces.
+                        if (_deliveryTrackable) ...[
+                          _trackDeliveryCard(),
+                          const SizedBox(height: 16),
+                        ],
                         // Part 3: the buyer's only "call a human" door
                         // points at the PLATFORM (Admin → Contact Settings),
                         // never at the provider — and never at a number
@@ -1420,6 +1450,86 @@ class _UserOrderDetailScreenState
             'Your payment has been verified, so you can now contact the '
             'provider directly. Keep arrangements in the app where you can.',
             style: TextStyle(fontSize: 12, height: 1.4),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// The buyer's door into live tracking: what the status timeline already
+  /// says, in one place, with the button that opens the moving map. The label
+  /// changes with the delivery's own state so the card never promises a driver
+  /// the admin has not assigned yet.
+  Widget _trackDeliveryCard() {
+    final String stateLabel;
+    final String blurb;
+    switch (_deliveryState) {
+      case 'DELIVERED':
+        stateLabel = 'Delivered';
+        blurb =
+            'You confirmed this delivery. The map still shows how it went, '
+            'and the receipt is on the order.';
+        break;
+      case 'ARRIVED':
+        stateLabel = 'Driver is there';
+        blurb =
+            'Your driver marked their arrival. Confirm on the tracking screen '
+            'once the order is actually in your hands.';
+        break;
+      default:
+        if ((_order?['delivery_driver_provider_id'] as String?) == null) {
+          stateLabel = 'Finding a driver';
+          blurb =
+              'Your payment is confirmed. An admin assigns a driver, and you '
+              'will watch them move on the map the moment they take the job.';
+        } else {
+          stateLabel = 'On the way';
+          blurb =
+              'Follow your driver to the drop-off point, see when they arrive, '
+              'and confirm the receipt from there.';
+        }
+    }
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: AppTheme.primaryGreen.withOpacity(0.05),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppTheme.primaryGreen.withOpacity(0.35)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.local_shipping_outlined,
+                  size: 18, color: AppTheme.primaryGreen),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text('Delivery',
+                    style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
+                        color: AppTheme.textPrimary)),
+              ),
+              Text(stateLabel,
+                  style:
+                      const TextStyle(fontSize: 11, color: AppTheme.textMuted)),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(blurb,
+              style: const TextStyle(
+                  fontSize: 12, color: AppTheme.textSecondary)),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: PrimaryButton(
+              label: 'TRACK DELIVERY',
+              icon: Icons.map_outlined,
+              onPressed: () =>
+                  context.push('/user/orders/${widget.orderId}/delivery'),
+            ),
           ),
         ],
       ),
