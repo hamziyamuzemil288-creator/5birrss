@@ -6,6 +6,7 @@ import 'package:geolocator/geolocator.dart' as geo;
 import 'package:go_router/go_router.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:latlong2/latlong.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:storage_client/storage_client.dart' show FileOptions;
 import '../../core/theme/app_theme.dart';
@@ -16,6 +17,7 @@ import '../../core/services/order_chat_service.dart';
 import '../../core/utils/order_number_format.dart';
 import '../../core/utils/friendly_error.dart';
 import '../../core/widgets/admin_payment_details_card.dart';
+import '../../core/widgets/live_map.dart';
 import '../../core/widgets/platform_contact_card.dart';
 import '../../core/widgets/rank_badge.dart';
 
@@ -97,6 +99,16 @@ class _UserOrderDetailScreenState
   // Escrow-gated provider contact (release_order_contact, APPROVED onwards).
   Map<String, String>? _providerContact;
 
+  // The provider's PICKUP point, read once the escrow releases the contact.
+  //
+  // Self-pickup has no delivery leg, so this map IS the thing the buyer paid
+  // for: where to collect the item. It is read through the same escrow window
+  // as the phone number above (APPROVED or later) and rendered by the same
+  // `LiveMap` widget the ride screens draw with — one map widget, not a second
+  // implementation. Null before the reveal, and again when the provider has
+  // published no point (the directions button then says so, as it already did).
+  Map<String, dynamic>? _pickupPoint;
+
   // Where to pay, read once the provider has confirmed availability.
   List<Map<String, dynamic>>? _paymentMethods;
 
@@ -173,6 +185,7 @@ class _UserOrderDetailScreenState
       // decided by the order's status.
       final contact = await _loadProviderContact(order);
       final methods = await _loadPaymentMethods(order);
+      final pickup = await _loadPickupPoint(order);
 
       if (mounted) {
         setState(() {
@@ -183,6 +196,7 @@ class _UserOrderDetailScreenState
           _reviewed = reviewed;
           _providerContact = contact;
           _paymentMethods = methods;
+          _pickupPoint = pickup;
           _loading = false;
           _error = null;
         });
@@ -535,9 +549,38 @@ class _UserOrderDetailScreenState
 
   /// Escrow reveal window: payment verified (APPROVED) or delivery in
   /// progress (STARTED) — the same statuses the DB gate (0032) enforces.
-  bool get _deliveryRevealed {
-    final status = _order?['status'] as String?;
-    return status == 'APPROVED' || status == 'STARTED';
+  bool get _deliveryRevealed =>
+      _escrowRevealedFor(_order?['status'] as String?);
+
+  /// The same window as a pure function of a status, so a screen being LOADED
+  /// (where `_order` is not set yet) is judged by the row it just read rather
+  /// than by state that does not exist yet.
+  bool _escrowRevealedFor(String? status) =>
+      status == 'APPROVED' || status == 'STARTED';
+
+  /// Where the buyer collects a self-pickup order, read once the escrow
+  /// releases it. Best-effort by design, like every read on this screen: a
+  /// provider who never set a point, or a failed read, leaves this null and
+  /// the directions button (which reports "no business location set") remains
+  /// the only answer — nothing is invented to fill the gap.
+  Future<Map<String, dynamic>?> _loadPickupPoint(
+      Map<String, dynamic> order) async {
+    if (_isProvider) return null;
+    if (!_escrowRevealedFor(order['status'] as String?)) return null;
+    final providerId = order['provider_id'] as String?;
+    if (providerId == null) return null;
+    try {
+      final rows = await Supabase.instance.client.rpc(
+          'get_provider_public_location',
+          params: {'p_provider_id': providerId});
+      final list = (rows as List?) ?? const [];
+      if (list.isEmpty) return null;
+      final row = Map<String, dynamic>.from(list.first as Map);
+      if (row['lat'] == null || row['lng'] == null) return null;
+      return row;
+    } catch (_) {
+      return null;
+    }
   }
 
   // ----------------------------------------------------------------
@@ -1038,6 +1081,16 @@ class _UserOrderDetailScreenState
                           _contactCard(),
                           const SizedBox(height: 16),
                         ],
+                        // The reveal-on-payment pickup map. Only for the buyer,
+                        // only once the escrow has opened, and only when the
+                        // provider has a point to show — the same three
+                        // conditions the phone number above answers to.
+                        if (!_isProvider &&
+                            _deliveryRevealed &&
+                            _pickupPoint != null) ...[
+                          _pickupCard(),
+                          const SizedBox(height: 16),
+                        ],
                         if (_deliveryRevealed) ...[
                           _locationCard(),
                           const SizedBox(height: 16),
@@ -1322,13 +1375,44 @@ class _UserOrderDetailScreenState
             ],
           ),
           const SizedBox(height: 8),
-          Text(
-            contact['phone'] ?? '',
-            style: const TextStyle(
-              fontSize: 18,
-              fontWeight: FontWeight.w700,
-              color: AppTheme.primaryGreen,
-              letterSpacing: 0.5,
+          // Tap-to-call, not decoration. The reveal already happened
+          // (release_order_contact refuses anything before APPROVED), so the
+          // only thing left is making the number the escrow just released
+          // actually usable — a phone number you cannot tap is a number the
+          // buyer copies by hand into a dialler that is not there.
+          InkWell(
+            borderRadius: BorderRadius.circular(8),
+            onTap: contact['phone'] == null || contact['phone']!.isEmpty
+                ? null
+                : () async {
+                    final launched = await LocationService.instance
+                        .openPhoneCall(contact['phone']!);
+                    if (!launched && mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                          content: Text(
+                              'Could not open the dialler — copy ${contact['phone']} instead.')));
+                    }
+                  },
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Row(
+                children: [
+                  const Icon(Icons.call,
+                      size: 20, color: AppTheme.primaryGreen),
+                  const SizedBox(width: 8),
+                  Text(
+                    contact['phone'] ?? '',
+                    style: const TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.w700,
+                      color: AppTheme.primaryGreen,
+                      letterSpacing: 0.5,
+                      decoration: TextDecoration.underline,
+                      decorationColor: AppTheme.primaryGreen,
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
           const SizedBox(height: 6),
@@ -1421,6 +1505,89 @@ class _UserOrderDetailScreenState
               ),
             ),
           ],
+        ],
+      ),
+    );
+  }
+
+  /// Where to collect: the provider's pickup point on the map, plus the way
+  /// out to it. Rendered ONLY inside the escrow window — this is the reveal,
+  /// and the condition above is the whole gate.
+  ///
+  /// The map is the shared `LiveMap` widget (the same one the ride screens
+  /// draw moving vehicles with), given a single pin: one map component in the
+  /// app, not a second one that only knows how to draw a static marker.
+  Widget _pickupCard() {
+    final point = _pickupPoint!;
+    final lat = (point['lat'] as num).toDouble();
+    final lng = (point['lng'] as num).toDouble();
+    final address = (point['address_text'] as String?)?.trim() ?? '';
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: AppTheme.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppTheme.cardBorder),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.storefront_outlined,
+                  size: 18, color: AppTheme.primaryGreen),
+              SizedBox(width: 8),
+              Expanded(
+                child: Text('Pickup location',
+                    style: TextStyle(
+                        fontSize: 14, fontWeight: FontWeight.w700)),
+              ),
+              Text('AFTER PAYMENT',
+                  style: TextStyle(
+                      fontSize: 9.5,
+                      fontWeight: FontWeight.w700,
+                      color: AppTheme.textMuted)),
+            ],
+          ),
+          const SizedBox(height: 6),
+          const Text(
+            'Your payment is verified, so this is where you collect the '
+            'order. The pin is the provider\'s own pickup point.',
+            style: TextStyle(fontSize: 12, color: AppTheme.textSecondary),
+          ),
+          const SizedBox(height: 12),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(10),
+            child: SizedBox(
+              height: 200,
+              child: LiveMap(
+                center: LatLng(lat, lng),
+                zoom: 16,
+                pickupPoint: LatLng(lat, lng),
+                // No recenter/zoom controls: this map is not being driven, it
+                // is being read, and a recenter button with no handler is a
+                // button that does nothing.
+                showRecenter: false,
+              ),
+            ),
+          ),
+          if (address.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Text(address,
+                style: const TextStyle(
+                    fontSize: 12.5, height: 1.4,
+                    color: AppTheme.textSecondary)),
+          ],
+          const SizedBox(height: 10),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: _directionsLaunching ? null : _openBusinessDirections,
+              icon: const Icon(Icons.navigation_outlined, size: 18),
+              label: const Text('OPEN DIRECTIONS'),
+            ),
+          ),
         ],
       ),
     );
