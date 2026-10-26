@@ -4,6 +4,28 @@ All notable changes to Aliob (All In One Business). The version name and
 versionCode here match `pubspec.yaml`'s `version:` line and
 `lib/core/app_build.dart` (pinned by `test/forced_update_gate_test.dart`).
 
+## 1.9.2+129 — 2026-10-26
+
+### Delivery
+
+- A delivery is priced as a base fee plus a per-kilometre rate against the
+  order distance, capped, instead of a flat fee.
+- The pickup point is revealed on the map only once the driver marks arrival,
+  and the number on that sheet is callable.
+- End to end: an administrator assigns a driver to a paid delivery, the driver
+  tracks the job and marks arrival, and the buyer confirms receipt to complete
+  the order. Only the order's own buyer may complete a delivery, and only after
+  that receipt is recorded.
+
+### Supabase
+
+- `20261026000001_delivery_pricing_is_base_plus_distance.sql` is applied on the
+  live database. `20261026000002_delivery_tracking_and_receipt.sql` is **not**
+  yet applied — its own deploy-time assertion stops the deploy — so tracking
+  and the receipt confirmation are not live until that migration applies.
+- Fixes to the delivery migrations: account deletion passes the delivery driver
+  key, and the delivery distance is cast so `round()` resolves.
+
 ## 1.9.1+128 — 2026-10-25
 
 ### Admin
