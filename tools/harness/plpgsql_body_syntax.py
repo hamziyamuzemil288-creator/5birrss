@@ -353,6 +353,26 @@ def check_file(path: pathlib.Path) -> list[str]:
     text = path.read_text()
     problems: list[str] = []
 
+    # The file AS A WHOLE, before any body is extracted.
+    #
+    # Everything below judges statements found INSIDE a dollar-quoted body. The
+    # statements AROUND them -- CREATE FUNCTION, COMMENT ON, GRANT, and the
+    # plain DDL that two thirds of these files are made of -- were parsed by
+    # nothing in this suite: no gate ran pglast over a whole pending migration.
+    #
+    # 20261025000005 shipped a JavaScript-style line continuation (`'...',\`)
+    # inside a COMMENT ON string. Every gate went green and `supabase db push`
+    # rejected the file with `syntax error at or near "\\"` (42601) -- after the
+    # commit was pushed and the deploy dispatched by hand. The body checks
+    # below cannot see it, because no body contains it.
+    try:
+        pglast.parse_sql(text)
+    except Exception as exc:  # noqa: BLE001 - report, never raise
+        problems.append(
+            f"{path.name}: the file itself does not parse: "
+            f"{str(exc).splitlines()[0]}"
+        )
+
     for line, _start, sql_body, stmt, to_parse in iter_statements(text):
         try:
             pglast.parse_sql(to_parse)
@@ -437,8 +457,8 @@ def main(argv: list[str]) -> int:
     if problems:
         print(f"\n{len(problems)} problem(s) in SQL inside plpgsql bodies.")
         return 1
-    print(f"ok: every SQL statement inside a plpgsql body in {len(targets)} "
-          f"file(s) parses")
+    print(f"ok: every statement in {len(targets)} file(s) parses "
+          f"(whole file and plpgsql/sql bodies)")
     return 0
 
 
