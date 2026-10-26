@@ -867,6 +867,8 @@ DECLARE
   v_arrived text;
   v_policy boolean;
   v_missing text := '';
+  v_others int;
+  v_other_args text;
 BEGIN
   -- 1. The columns. A missing one makes every read below NULL rather than
   --    wrong, which is the worst shape a failure can take.
@@ -925,15 +927,42 @@ BEGIN
   -- 4. The whitelist: the new buyer clause must be there, and the old
   --    provider/admin clause must STILL be there. A restatement that swapped
   --    one for the other would let a seller complete their own orders again.
-  SELECT regexp_replace(lower(p.prosrc), E'\s+', ' ', 'g') INTO v_whitelist
+  --
+  --    Read through the SIGNATURE, not through the name. The first spelling of
+  --    this check was `WHERE p.proname = 'transition_order_status'`, and it
+  --    failed a deploy on a body this file had already replaced: a bare-name
+  --    lookup is unordered across every definition sharing that name, so with
+  --    more than one candidate it can read a stale sibling instead of the
+  --    function written a few statements above. Deploy #40409969801 died that
+  --    way. assert_gated_buyer_payment_request_is_wired() (20260927000085)
+  --    already reads the same function through `::regprocedure` for the same
+  --    reason; this now matches it.
+  SELECT regexp_replace(lower(pg_get_functiondef(
+           'public.transition_order_status(uuid, order_status, uuid, text)'::regprocedure
+         )), E'\s+', ' ', 'g')
+    INTO v_whitelist;
+
+  -- Every OTHER definition of that name. Not an assertion — the migration's
+  -- own CREATE OR REPLACE cannot fix a sibling it does not address, and a
+  -- sibling is exactly what would make the check above read the wrong body.
+  -- The count is reported in the verdict below so it is evidence on the next
+  -- run instead of another guess.
+  SELECT count(*), string_agg(pg_get_function_identity_arguments(p.oid), ' | '
+                              ORDER BY p.oid)
+    INTO v_others, v_other_args
     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-   WHERE n.nspname = 'public' AND p.proname = 'transition_order_status';
+   WHERE n.nspname = 'public'
+     AND p.proname = 'transition_order_status'
+     AND p.oid <> 'public.transition_order_status(uuid, order_status, uuid, text)'::regprocedure;
 
   IF position('v_actor_is_provider or v_actor_is_admin' in v_whitelist) = 0
      OR position('v_actor_is_provider or v_actor_is_admin or v_buyer_may_open_payment'
                  in v_whitelist) = 0 THEN
     RETURN 'FAIL: transition_order_status lost the provider/admin clauses of '
-           || 'the whitelist while adding the delivery receipt';
+           || 'the whitelist while adding the delivery receipt'
+           || ' [definitions of that name on this database: '
+           || (coalesce(v_others, 0) + 1)::text
+           || '; other signatures: ' || coalesce(v_other_args, 'none') || ']';
   END IF;
 
   IF position('delivery_status = ''delivered''' in v_whitelist) = 0
@@ -964,7 +993,11 @@ BEGIN
 
   RETURN 'ok: the delivery has a destination, a driver, an arrival, a receipt '
          || 'and a live-tracking policy, and the whitelist gained the receipt '
-         || 'clause without losing anything else';
+         || 'clause without losing anything else'
+         || ' [transition_order_status definitions on this database: '
+         || (coalesce(v_others, 0) + 1)::text
+         || case when coalesce(v_others, 0) = 0 then ''
+                 else ', other signatures: ' || v_other_args end || ']';
 END;
 $$;
 
@@ -985,6 +1018,12 @@ DECLARE
   v_verdict text;
 BEGIN
   v_verdict := public.assert_delivery_flow_is_wired();
+  -- Printed, not only raised: the verdict carries how many definitions of
+  -- transition_order_status this database has and the signatures of the extra
+  -- ones. A green deploy would otherwise record none of that, and a second
+  -- definition of a name the app calls by name is exactly what a later
+  -- unexplained behaviour would be blamed on.
+  RAISE NOTICE '20261026000002: %', v_verdict;
   -- A FAIL raised here stops the deploy at the migration that caused it,
   -- instead of leaving a half-wired flow for a screen to discover later.
   IF v_verdict LIKE 'FAIL%' THEN
