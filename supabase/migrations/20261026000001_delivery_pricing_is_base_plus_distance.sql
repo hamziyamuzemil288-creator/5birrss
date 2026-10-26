@@ -209,13 +209,22 @@ AS $$
   -- distance in km: the same great-circle measure calculate_fare_estimate_at
   -- prices a ride on, so a delivery and a ride over the same ground measure
   -- the same distance even though they price differently.
+  --
+  -- The ::numeric on the distance term is load-bearing, not decoration.
+  -- st_distance(geography, geography) returns double precision, and
+  -- numeric * double precision resolves to double precision, so the sum came
+  -- out as double precision and round(double precision, integer) does not
+  -- exist — Deploy Supabase #29 died on exactly that (SQLSTATE 42883) after
+  -- the first half of this file had already run. Casting the distance keeps
+  -- the arithmetic in numeric, which is what round(x, 2) accepts and what
+  -- quote_delivery_fee already does with the same measurement below.
   SELECT round(
     coalesce(public.get_setting_numeric('delivery_base_fee'), 70)
     + coalesce(public.fee_ride_per_km(p_vehicle_category_id, p_city), 0)
       * (st_distance(
            st_setsrid(st_makepoint(p_pickup_lng, p_pickup_lat), 4326)::geography,
            st_setsrid(st_makepoint(p_dest_lng, p_dest_lat), 4326)::geography
-         ) / 1000.0),
+         ) / 1000.0)::numeric,
     2
   )::numeric(12, 2);
 $$;
