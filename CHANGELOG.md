@@ -4,6 +4,27 @@ All notable changes to Aliob (All In One Business). The version name and
 versionCode here match `pubspec.yaml`'s `version:` line and
 `lib/core/app_build.dart` (pinned by `test/forced_update_gate_test.dart`).
 
+## 1.9.3+130 — 2026-10-27
+
+### Delivery
+
+- Delivery tracking and receipt confirmation are live on the server:
+  `20261026000002_delivery_tracking_and_receipt.sql` was applied by the
+  `Deploy Supabase` run of 2026-10-27 00:09 UTC, so the driver's tracking map,
+  the arrival mark and the buyer's "I received it" completion now run against
+  the deployed functions instead of an unapplied migration.
+- Fixed the self-check that had been stopping that migration: the
+  body-flattening pattern was written `E'\s+'`, where PostgreSQL takes an
+  unrecognised escape literally, so the pattern was `s+` — every needle
+  containing an “s” read as missing and the deploy aborted on its own
+  assertion.
+
+### Supabase
+
+- `supabase/DEPLOYED_HEAD` is now
+  `20261026000002_delivery_tracking_and_receipt.sql`; nothing is pending, so the
+  pre-deploy gates re-check the newest migration rather than an empty set.
+
 ## 1.9.2+129 — 2026-10-26
 
 ### Delivery
@@ -20,9 +41,11 @@ versionCode here match `pubspec.yaml`'s `version:` line and
 ### Supabase
 
 - `20261026000001_delivery_pricing_is_base_plus_distance.sql` is applied on the
-  live database. `20261026000002_delivery_tracking_and_receipt.sql` is **not**
-  yet applied — its own deploy-time assertion stops the deploy — so tracking
-  and the receipt confirmation are not live until that migration applies.
+  live database at the time of this release.
+  `20261026000002_delivery_tracking_and_receipt.sql` was **not** yet applied —
+  its own deploy-time assertion stopped the deploy — so tracking and the
+  receipt confirmation were not live until that migration applied
+  (see 1.9.3+130, which applies it).
 - Fixes to the delivery migrations: account deletion passes the delivery driver
   key, and the delivery distance is cast so `round()` resolves.
 
