@@ -22,8 +22,18 @@ versionCode here match `pubspec.yaml`'s `version:` line and
 ### Supabase
 
 - `supabase/DEPLOYED_HEAD` is now
-  `20261026000002_delivery_tracking_and_receipt.sql`; nothing is pending, so the
-  pre-deploy gates re-check the newest migration rather than an empty set.
+  `20261026000002_delivery_tracking_and_receipt.sql`.
+- `20261026000003_the_delivery_assertion_reaches_anon.sql` restores anon's
+  EXECUTE on `assert_delivery_fee_reuses_the_ride_fare()`. The restatement in
+  `20261026000001` narrowed that grant to `authenticated, service_role` while
+  fixing the fee body, so the connectivity suite — which runs as `anon` — could
+  no longer call it, and reported it as an unreachable assertion (118 passed, 1
+  failed) rather than as the privilege change it was.
+- The static harness now applies the same rule the live
+  `assert_every_assertion_is_reachable()` guard applies: every zero-argument
+  `assert_*` function must end up executable by `anon`. It could not be caught
+  before, because the suite reaches these functions by name only through the
+  database, so no scan of the Dart saw it.
 
 ## 1.9.2+129 — 2026-10-26
 

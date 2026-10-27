@@ -5873,6 +5873,66 @@ def check_client_rpcs_are_executable() -> list[str]:
                     "REVOKEs it from anon or PUBLIC with no GRANT back. It "
                     "will fail as PGRST202." % m.group(1))
 
+    # --- the zero-argument assert_* family the live guard enumerates --------
+    #
+    # assert_every_assertion_is_reachable() (20260927000091) walks every
+    # zero-argument `assert_*` in `public` on the LIVE database and returns a
+    # FAIL naming each one that is not executable by anon. The two scans above
+    # cannot reproduce that, because they are name-driven and the suite never
+    # names these functions: the database enumerates them.
+    #
+    # That is exactly how 20261026000001 shipped a narrowed grant. It RESTATED
+    # assert_delivery_fee_reuses_the_ride_fare() and wrote its grant as
+    # `REVOKE ... FROM public, anon; GRANT ... TO authenticated, service_role;`,
+    # dropping the anon privilege `20261015000002` had given it. No client-side
+    # gate saw it (the app never calls an `assert_*`), the deploy reported
+    # success, and Connectivity CI went red on its next run with 118 passed, 1
+    # failed -- the only check that could have caught it was the one whose whole
+    # job is to name an unreachable assertion.
+    #
+    # 20261007000008 runs this same family check in a DO block and it did not
+    # help, because a DO block executes once, at its own deploy; nothing re-ran
+    # it after 20261026000001. This harness reads the whole migration history,
+    # so it is the one place the family can be judged before every deploy
+    # rather than at the single moment one migration first lands.
+    #
+    # Zero-argument only, because the live guard's loop is `p.pronargs = 0`; an
+    # assertion that takes parameters is not in the family. DROPs are honoured --
+    # two functions in this history were retired that way and neither should be
+    # reported.
+    last_create: dict[str, int] = {}
+    last_drop: dict[str, int] = {}
+    family: dict[str, str] = {}
+    span = 0
+    for path in migration_files():
+        src = _statements_only(_read(path))
+        for m in re.finditer(
+                r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:public\.)?"
+                r"(assert_[a-z_0-9]+)\s*\(\s*\)", src, re.IGNORECASE):
+            name = m.group(1).lower()
+            last_create[name] = span + m.start()
+            family.setdefault(name, path.name)
+        for m in re.finditer(
+                r"DROP\s+FUNCTION\s+(?:IF\s+EXISTS\s+)?(?:public\.)?"
+                r"(assert_[a-z_0-9]+)\s*\(\s*\)", src, re.IGNORECASE):
+            last_drop[m.group(1).lower()] = span + m.start()
+        span += len(src) + 1
+
+    for name in sorted(family):
+        if last_drop.get(name, -1) > last_create[name]:
+            continue
+        if not executable(name, "anon"):
+            problems.append(
+                "%s() is a zero-argument assertion in the family that "
+                "assert_every_assertion_is_reachable() (20260927000091) "
+                "enumerates on the live database, and its final privilege "
+                "state leaves it unreachable by ANON -- the role Connectivity "
+                "CI runs as. That guard reports it as a FAIL string rather "
+                "than PGRST202, because the function IS there. A restatement "
+                "that narrows the grant is the usual cause: grant it with "
+                "`GRANT EXECUTE ON FUNCTION public.%s() TO anon, authenticated, "
+                "service_role`." % (name, name))
+
     return problems
 
 

@@ -189,6 +189,53 @@ def main() -> int:
             "--     REVOKE ALL ON FUNCTION public.list_staff_jobs() FROM public, anon;",
             "REVOKE ALL ON FUNCTION public.list_staff_jobs() FROM public, anon;")})
 
+    # G. THE ONE THAT REACHED THE LIVE DATABASE. Cases A and E both anchor on a
+    #    migration that grants a NAMED assertion, which the suite's own source
+    #    names in a call. This one is different, and that difference is the
+    #    whole bug: the suite never names assert_delivery_fee_reuses_the_ride_
+    #    fare(). assert_every_assertion_is_reachable() enumerates the family on
+    #    the live database, so a name-driven scan of the Dart is blind to it by
+    #    construction -- which is why 20261026000001 could restate that function
+    #    with its grant narrowed to `authenticated, service_role` (dropping the
+    #    anon privilege 20261015000002 gave it), deploy clean, and fail
+    #    Connectivity CI on the next run instead.
+    #
+    #    20261026000003 puts the grant back. Removing it again must go red, and
+    #    the red must name that function -- a gate that reported a different
+    #    assertion, or the whole family, would be answering a different
+    #    question.
+    repair = sc._read(
+        sc.MIGRATIONS / "20261026000003_the_delivery_assertion_reaches_anon.sql")
+    anon_grant = ("GRANT EXECUTE ON FUNCTION "
+                  "public.assert_delivery_fee_reuses_the_ride_fare()\n"
+                  "  TO anon, authenticated, service_role;")
+    assert anon_grant in repair, \
+        "falsifier anchor missing: 000003 anon grant"
+    dropped = with_patches({
+        "20261026000003_the_delivery_assertion_reaches_anon.sql":
+            repair.replace(anon_grant, "")})
+    if not dropped:
+        print("[FAIL] G: the delivery assertion narrowed away from anon -> "
+              "stayed GREEN")
+        ok = False
+    elif not any("assert_delivery_fee_reuses_the_ride_fare" in p
+                 for p in dropped):
+        print("[FAIL] G: went red, but not by naming the assertion that lost "
+              "its grant")
+        ok = False
+    else:
+        print("[ ok ] G: the delivery assertion narrowed away from anon -> caught")
+
+    # G'. The family rule is zero-ARGUMENT only, mirroring the live guard's
+    #     `p.pronargs = 0`. An assertion that takes parameters is a different
+    #     function and must not be dragged in -- a gate that flagged every
+    #     `assert_*` would report roughly two dozen working functions and be
+    #     ignored, which is the failure mode case B records.
+    ok &= expect_green(
+        "G': the real sources are green, so the family rule flags no working "
+        "zero-argument assertion",
+        {})
+
     if not ok:
         print("\nFALSIFICATION FAILED")
         return 1
