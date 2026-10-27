@@ -4,6 +4,8 @@ All notable changes to Aliob (All In One Business). The version name and
 versionCode here match `pubspec.yaml`'s `version:` line and
 `lib/core/app_build.dart` (pinned by `test/forced_update_gate_test.dart`).
 
+## 1.9.3+132 - 2026-10-27
+
 ## 1.9.3+130 — 2026-10-27
 
 ### Delivery

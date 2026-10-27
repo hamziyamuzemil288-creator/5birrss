@@ -32,4 +32,4 @@ const String kAppVersionName = '1.9.3';
 /// The build number from `pubspec.yaml`'s `version:` line (`1.6.4+106`), i.e.
 /// the part after the `+`. Sent to the server as the `x-client-build` header
 /// and compared against `app_release_config.min_required_build`.
-const int kAppBuildNumber = 130;
+const int kAppBuildNumber = 132;
