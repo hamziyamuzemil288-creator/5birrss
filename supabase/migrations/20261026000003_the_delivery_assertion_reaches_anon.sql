@@ -37,6 +37,22 @@
 --     assertion functions are not executable by it:
 --     assert_delivery_fee_reuses_the_ride_fare.
 --
+-- THE SAME RESTATEMENT ALSO BROKE THE BODY
+--
+-- The grant was not the only thing 20261026000001 got wrong in that function.
+-- Its predecessor (20261015000002) flattened bodies with `E'\\s+'`, which is
+-- the pattern `\s+`. The restatement wrote `E'\s+'` in all five SELECTs, and an
+-- unrecognised escape is taken LITERALLY (PostgreSQL 18, §4.1.2.2), so the
+-- pattern became `s+` -- every run of the letter `s` replaced by a space, in
+-- the body text the needles are then searched for. Every needle in that
+-- function contains an `s` (`calculate_fare_estimate_at`,
+-- `platform_display_markup`, ...), so the function returns a FAIL string that
+-- describes the regex, not the delivery fee.
+--
+-- Restoring the grant without this would make a broken function reachable
+-- again: before 20261026000001 it was both correct and callable. So the body
+-- is restated here and only the five broken lines change.
+--
 -- WHY A NEW FILE AND NOT AN EDIT
 --
 -- An applied migration is not edited here. A missing GRANT is runtime state any
@@ -58,6 +74,102 @@
 --
 -- Idempotent: GRANT is a no-op when the privilege is already held, and the
 -- guard below only reads the catalog.
+
+-- -----------------------------------------------------------------------------
+-- The body, restated with the escaping defect gone. Only the five
+-- `regexp_replace` lines differ from 20261026000001's version; everything else
+-- is a verbatim copy of the predecessor, so this cannot quietly change what the
+-- assertion checks.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.assert_delivery_fee_reuses_the_ride_fare()
+RETURNS text
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_delivery text;
+  v_quote text;
+  v_markup text;
+  v_column text;
+  v_ride text;
+  v_per_km text;
+BEGIN
+  SELECT regexp_replace(lower(p.prosrc), E'\\s+', ' ', 'g') INTO v_delivery
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public' AND p.proname = 'calculate_delivery_fee_at';
+
+  SELECT regexp_replace(lower(p.prosrc), E'\\s+', ' ', 'g') INTO v_quote
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public' AND p.proname = 'quote_delivery_fee';
+
+  SELECT regexp_replace(lower(p.prosrc), E'\\s+', ' ', 'g') INTO v_markup
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public' AND p.proname = 'platform_display_markup';
+
+  -- The ride context: untouched by this migration, and it must still be there.
+  SELECT regexp_replace(lower(p.prosrc), E'\\s+', ' ', 'g') INTO v_ride
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public' AND p.proname = 'create_ride_request';
+
+  -- The shared per-km resolver: the ONE store of per-vehicle rates.
+  SELECT regexp_replace(lower(p.prosrc), E'\\s+', ' ', 'g') INTO v_per_km
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public' AND p.proname = 'fee_ride_per_km';
+
+  SELECT pg_get_expr(d.adbin, d.adrelid) INTO v_column
+    FROM pg_attribute a
+    JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+   WHERE a.attrelid = 'public.products'::regclass
+     AND a.attname = 'display_price';
+
+  IF v_delivery IS NULL OR v_quote IS NULL OR v_markup IS NULL THEN
+    RETURN 'FAIL: the delivery quote, the delivery price or the markup function is missing';
+  END IF;
+
+  -- 1. The delivery price is base + per-km x distance, read from the platform
+  --    stores — not a private formula and not the ride fare with a floor.
+  IF position('delivery_base_fee' in v_delivery) = 0
+     OR position('fee_ride_per_km' in v_delivery) = 0 THEN
+    RETURN 'FAIL: calculate_delivery_fee_at no longer prices delivery_base_fee + fee_ride_per_km x distance';
+  END IF;
+
+  -- 2. The preview the buyer sees goes through the same chain, AND applies the
+  --    cap, so a checkout can never quote a delivery the charge would refuse.
+  IF position('delivery_base_fee' in v_quote) = 0
+     OR position('fee_ride_per_km' in v_quote) = 0 THEN
+    RETURN 'FAIL: quote_delivery_fee no longer prices through delivery_base_fee + fee_ride_per_km, so the quoted delivery price is not the charged one';
+  END IF;
+
+  IF position('max_delivery_distance_km' in v_quote) = 0
+     OR position('beyond_max_distance' in v_quote) = 0 THEN
+    RETURN 'FAIL: quote_delivery_fee lost the maximum-distance cap, so a delivery too far away is still offered';
+  END IF;
+
+  -- 3. The product markup must be untouched: this migration removed it from
+  --    the DELIVERY price, which is not a licence to move it.
+  IF position('+ 5 +' in v_markup) = 0 OR position('* 0.019' in v_markup) = 0 THEN
+    RETURN 'FAIL: platform_display_markup no longer computes amount + 5 + amount * 0.019';
+  END IF;
+
+  IF v_column IS NULL OR position('platform_display_markup' in lower(v_column)) = 0 THEN
+    RETURN 'FAIL: products.display_price is generated from something other than platform_display_markup (column expression: %)';
+  END IF;
+
+  -- 4. The ride side must still be standing, and the per-km resolver it reads
+  --    must still be the one delivery now reads too.
+  IF v_ride IS NULL OR position('calculate_fare_estimate_at' in v_ride) = 0 THEN
+    RETURN 'FAIL: create_ride_request no longer charges through calculate_fare_estimate_at';
+  END IF;
+
+  IF v_per_km IS NULL THEN
+    RETURN 'FAIL: fee_ride_per_km is missing, so neither rides nor deliveries have a per-km rate';
+  END IF;
+
+  RETURN 'ok: delivery prices delivery_base_fee + fee_ride_per_km x distance with a max-distance cap, the product markup is untouched, and the ride fare still resolves through calculate_fare_estimate_at';
+END;
+$$;
 
 GRANT EXECUTE ON FUNCTION public.assert_delivery_fee_reuses_the_ride_fare()
   TO anon, authenticated, service_role;

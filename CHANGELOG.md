@@ -23,12 +23,17 @@ versionCode here match `pubspec.yaml`'s `version:` line and
 
 - `supabase/DEPLOYED_HEAD` is now
   `20261026000002_delivery_tracking_and_receipt.sql`.
-- `20261026000003_the_delivery_assertion_reaches_anon.sql` restores anon's
-  EXECUTE on `assert_delivery_fee_reuses_the_ride_fare()`. The restatement in
-  `20261026000001` narrowed that grant to `authenticated, service_role` while
-  fixing the fee body, so the connectivity suite — which runs as `anon` — could
-  no longer call it, and reported it as an unreachable assertion (118 passed, 1
-  failed) rather than as the privilege change it was.
+- `20261026000003_the_delivery_assertion_reaches_anon.sql` repairs both halves of
+  what the restatement in `20261026000001` broke in
+  `assert_delivery_fee_reuses_the_ride_fare()`. It narrowed the grant to
+  `authenticated, service_role`, so the connectivity suite — which runs as
+  `anon` — could no longer call it and reported it as an unreachable assertion
+  (118 passed, 1 failed) rather than as the privilege change it was. It also
+  replaced the body's four `E'\\s+'` patterns with five written `E'\s+'`, where
+  PostgreSQL takes the unknown escape literally, so the pattern was really `s+`
+  and every needle — all of which contain an `s` — read as missing. The body is
+  restated with the escaping corrected; only those five lines differ from the
+  version it replaces.
 - The static harness now applies the same rule the live
   `assert_every_assertion_is_reachable()` guard applies: every zero-argument
   `assert_*` function must end up executable by `anon`. It could not be caught
