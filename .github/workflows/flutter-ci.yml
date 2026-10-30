@@ -288,6 +288,36 @@ jobs:
             echo "::warning::Push will be OFF in this build: the FIREBASE_* secrets are absent from this run's context (check secret names Settings → Secrets and variables → Actions)."
           fi
 
+      # Every Flutter plugin in this project declares NDK 28.2.13676358, so the
+      # release build needs it. AGP installs it on demand, and on 2026-10-30
+      # that on-demand download died mid-archive ("Error on ZipFile unknown
+      # archive") and took the whole release build with it — the same commit
+      # built fine earlier, so the download is the flaky part, not the code.
+      # Installing it here, with retries, costs ~15 s when the network behaves
+      # and saves the run when it does not. A half-extracted directory is
+      # removed before retrying: sdkmanager otherwise calls the broken install
+      # complete because the target directory exists.
+      - name: Pre-install the Android NDK
+        run: |
+          ndk_version="28.2.13676358"
+          ndk="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}/ndk/$ndk_version"
+          sdkmanager="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}/cmdline-tools/latest/bin/sdkmanager"
+          for attempt in 1 2 3; do
+            if [ -f "$ndk/source.properties" ]; then
+              echo "NDK $ndk_version already installed"
+              exit 0
+            fi
+            echo "Installing NDK $ndk_version (attempt $attempt of 3)"
+            rm -rf "$ndk"
+            "$sdkmanager" --install "ndk;$ndk_version" > /dev/null || true
+          done
+          if [ -f "$ndk/source.properties" ]; then
+            echo "NDK $ndk_version installed"
+            exit 0
+          fi
+          echo "::error::Could not install NDK $ndk_version after 3 attempts (sdkmanager download keeps truncating)."
+          exit 1
+
       - name: Build release app bundle
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}

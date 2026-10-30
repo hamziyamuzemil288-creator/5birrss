@@ -7,13 +7,14 @@ plugins {
 android {
     namespace = "com.amistbirr.myapp"
     compileSdk = 36
-    // Pinned to the NDK that the ubuntu-latest GitHub runner image already
-    // ships (27.3.13750724). `flutter.ndkVersion` floats to whatever Flutter
-    // release the runner installs (currently 28.2.13676358), which is not
-    // preinstalled, so Gradle tries to download android-ndk-r28c-linux on
-    // every build and intermittently fails with "Error on ZipFile unknown
-    // archive". Using the preinstalled NDK keeps the release build hermetic.
-    ndkVersion = "27.3.13750724"
+    // Pinned to the version every Flutter plugin here declares (app_links,
+    // firebase_core, firebase_messaging, flutter_local_notifications, ...).
+    // `flutter.ndkVersion` happens to resolve to this today, but it floats
+    // with whatever Flutter release CI installs, and AGP fails the build when
+    // a plugin needs a newer NDK than the project names. Naming it keeps the
+    // declaration and the plugins in step. CI pre-installs this NDK so the
+    // build never downloads it mid-run (see .github/workflows/flutter-ci.yml).
+    ndkVersion = "28.2.13676358"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
