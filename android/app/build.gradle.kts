@@ -7,7 +7,13 @@ plugins {
 android {
     namespace = "com.amistbirr.myapp"
     compileSdk = 36
-    ndkVersion = "27.2.13433460"
+    // Pinned to the NDK that the ubuntu-latest GitHub runner image already
+    // ships (27.3.13750724). `flutter.ndkVersion` floats to whatever Flutter
+    // release the runner installs (currently 28.2.13676358), which is not
+    // preinstalled, so Gradle tries to download android-ndk-r28c-linux on
+    // every build and intermittently fails with "Error on ZipFile unknown
+    // archive". Using the preinstalled NDK keeps the release build hermetic.
+    ndkVersion = "27.3.13750724"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

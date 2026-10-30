@@ -41,10 +41,13 @@ jobs:
       # about what this image happens to ship this month.
       #
       # The Android SDK and its NDK are deliberately NOT in the list. The
-      # release build names the NDK through `ndkVersion = flutter.ndkVersion`
-      # (android/app/build.gradle.kts), and AGP answers a missing NDK by
-      # downloading that exact version mid-build — ~660 MB compressed, 2-3 GB
-      # extracted. Freeing space by forcing a download is not freeing space.
+      # release build pins the NDK to 27.3.13750724
+      # (android/app/build.gradle.kts), the version this image ships.
+      # Pinning to `flutter.ndkVersion` instead names 28.2.13676358, which is
+      # NOT preinstalled, so AGP downloads it mid-build (~660 MB compressed,
+      # 2-3 GB extracted) and intermittently dies on
+      # "Error on ZipFile unknown archive". Freeing space by forcing a
+      # download is not freeing space.
       # NOTE (minutes pass): this job no longer builds twice — the debug APK
       # build is temporarily removed below — so the shortfall this reclaim was
       # added for no longer applies. It is kept anyway: it costs ~30 s and the
