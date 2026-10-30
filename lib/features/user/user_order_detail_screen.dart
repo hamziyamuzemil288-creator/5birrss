@@ -136,16 +136,30 @@ class _UserOrderDetailScreenState
               '*, provider_profiles(business_name), order_items(product_id, quantity, unit_price, subtotal, products(name, price, currency))')
           .eq('id', widget.orderId)
           .single();
-      final timeline = await client
-          .from('order_status_history')
-          .select('*')
-          .eq('order_id', widget.orderId)
-          .order('created_at', ascending: true);
+
+      // Everything after this line is supporting detail around one order row.
+      // Each block fails on its own now: they used to share the single
+      // try/catch below, so one sub-read that could not answer (a timeline
+      // read, a proof URL for a file that is no longer in the bucket) wiped
+      // the whole page to "Could not load order" and hid the very order the
+      // buyer had come to look at. Missing detail renders as missing detail;
+      // only the order itself being unreadable is a broken page.
+      List<Map<String, dynamic>> timeline = const [];
+      try {
+        final rows = await client
+            .from('order_status_history')
+            .select('*')
+            .eq('order_id', widget.orderId)
+            .order('created_at', ascending: true);
+        timeline = List<Map<String, dynamic>>.from(rows as List);
+      } catch (_) {
+        timeline = const [];
+      }
 
       // Resolve actor names (best-effort; timeline still shows without them).
       final names = <String, String>{};
       try {
-        final actorIds = (timeline as List)
+        final actorIds = timeline
             .map((t) => t['changed_by'] as String?)
             .whereType<String>()
             .toSet()
@@ -162,15 +176,31 @@ class _UserOrderDetailScreenState
       } catch (_) {}
 
       String? proofUrl;
-      final proof = await client
-          .from('payment_proofs')
-          .select('storage_path')
-          .eq('order_id', widget.orderId)
-          .maybeSingle();
-      if (proof != null && proof['storage_path'] != null) {
-        proofUrl = await client.storage
-            .from('payment-proofs')
-            .createSignedUrl(proof['storage_path'] as String, 3600);
+      try {
+        // Newest first, one row, as a list: `.maybeSingle()` asks PostgREST
+        // for a single object and THROWS when a retried submission left two
+        // proof rows on this order — which is exactly what the buyer does when
+        // a payment step misbehaves, and it then made every later visit to
+        // this page fail. A list cannot throw on a second row.
+        final rows = await client
+            .from('payment_proofs')
+            .select('storage_path')
+            .eq('order_id', widget.orderId)
+            .order('created_at', ascending: false)
+            .limit(1);
+        final path = rows.isEmpty
+            ? null
+            : (rows.first['storage_path'] as String?);
+        if (path != null && path.isNotEmpty) {
+          proofUrl = await client.storage
+              .from('payment-proofs')
+              .createSignedUrl(path, 3600);
+        }
+      } catch (_) {
+        // A signature for a file that is gone is not worth failing the page
+        // over: the card still says a proof was submitted, it just cannot
+        // show it. The proof itself is the row, not the preview.
+        proofUrl = null;
       }
 
       // Whether the current user already reviewed this order (best-effort).
@@ -190,7 +220,7 @@ class _UserOrderDetailScreenState
       if (mounted) {
         setState(() {
           _order = order;
-          _timeline = List<Map<String, dynamic>>.from(timeline as List);
+          _timeline = timeline;
           _actorNames = names;
           _proofUrl = proofUrl;
           _reviewed = reviewed;
@@ -1053,8 +1083,7 @@ class _UserOrderDetailScreenState
       appBar: AppBar(title: const Text('Order Details')),
       body: _loading
           ? const Center(
-              child: CircularProgressIndicator(color: AppTheme.primaryGreen))
-          : _error != null
+              child: CircularProgressIndicator(color: AppTheme.primaryGreen))          : _error != null
               ? Center(
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
@@ -1063,8 +1092,20 @@ class _UserOrderDetailScreenState
                           size: 48, color: AppTheme.textMuted),
                       const SizedBox(height: 12),
                       Text(_error!,
-                          style:
-                              const TextStyle(color: AppTheme.textMuted)),
+                          style: const TextStyle(color: AppTheme.textMuted)),
+                      const SizedBox(height: 16),
+                      // A dead end with no way back is the worst version of
+                      // this state — one refresh costs a tap.
+                      OutlinedButton(
+                        onPressed: () {
+                          setState(() {
+                            _loading = true;
+                            _error = null;
+                          });
+                          _load();
+                        },
+                        child: const Text('Try again'),
+                      ),
                     ],
                   ),
                 )

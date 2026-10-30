@@ -151,25 +151,71 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
   /// banner per rebuild is a banner nobody reads.
   static bool _greeted = false;
 
-  /// "You have N new updates" — the in-app half of "notifications must appear
-  /// when the app opens".
+  /// "Something happened, and the app said so at the very top" — the in-app
+  /// half of "notifications must appear when the app opens".
   ///
-  /// The rows already exist by the time this runs: the server writes them for
-  /// orders, payments, availability answers and account events, and the bell's
-  /// badge counts them. What was missing was the app SAYING so on open, which
-  /// is why a working inbox read as a silent feature. The banner is the same
-  /// one signup uses, it is non-blocking, and it is shown at most once per app
-  /// run — the inbox and the badge stay the durable record.
+  /// It used to return silently whenever there was nothing UNREAD, which is
+  /// how a working inbox read as a dead feature: open the app having already
+  /// read yesterday's updates and the top of the screen said nothing at all.
+  /// Now every app open announces something, in this order:
+  ///
+  ///   1. unread rows exist       -> the count (the thing worth acting on),
+  ///   2. a recent notification   -> its own title and body, read or not,
+  ///                                  so the banner carries real content,
+  ///   3. nothing at all          -> the welcome.
+  ///
+  /// Still at most once per app run (see [_greeted]) and still non-blocking:
+  /// the bell's badge and the inbox remain the durable record.
   Future<void> _announceUnreadOnce() async {
     if (_greeted) return;
     _greeted = true;
     try {
-      final count = await ref.read(unreadNotificationsCountProvider.future);
-      if (!mounted || count <= 0) return;
-      SystemBannerController.instance.show(
-        title: count == 1 ? 'You have 1 new update' : 'You have $count new updates',
-        message: 'Open the bell at the top to read them.',
-      );
+      final uid = Supabase.instance.client.auth.currentUser?.id;
+      if (uid == null) return;
+
+      final unread = await ref.read(unreadNotificationsCountProvider.future);
+
+      // Only worth reading when the count has nothing to say.
+      Map<String, dynamic>? latest;
+      if (unread <= 0) {
+        final rows = await Supabase.instance.client
+            .from('notifications')
+            .select('title, body, created_at')
+            .eq('user_id', uid)
+            .order('created_at', ascending: false)
+            .limit(1);
+        if (rows.isNotEmpty) {
+          final row = Map<String, dynamic>.from(rows.first as Map);
+          final at = DateTime.tryParse('${row['created_at']}');
+          // A month-old row is history, not news — the inbox is where that
+          // belongs, so it does not get announced as though it just landed.
+          if (at != null &&
+              DateTime.now().difference(at) < const Duration(days: 7)) {
+            latest = row;
+          }
+        }
+      }
+
+      if (!mounted) return;
+      if (unread > 0) {
+        SystemBannerController.instance.show(
+          title: unread == 1
+              ? 'You have 1 new update'
+              : 'You have $unread new updates',
+          message: 'Tap the bell at the top to read them.',
+        );
+      } else if (latest != null) {
+        final body = '${latest['body'] ?? ''}'.trim();
+        SystemBannerController.instance.show(
+          title: '${latest['title'] ?? 'Aliob'}',
+          message: body.isEmpty ? 'Tap the bell to open your updates.' : body,
+        );
+      } else {
+        SystemBannerController.instance.show(
+          title: 'Welcome to Aliob',
+          message: 'Browse, order and pay — everything lands under the bell.',
+        );
+      }
     } catch (_) {
       // A greeting is never worth an error.
     }

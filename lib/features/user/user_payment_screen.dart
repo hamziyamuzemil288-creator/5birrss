@@ -1,9 +1,11 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../core/services/cart_service.dart';
@@ -81,6 +83,115 @@ class OrderDraft {
   double get payableTotal => productTotal + deliveryFeeShown;
 
   String get currency => items.isNotEmpty ? items.first.currency : 'ETB';
+
+  /// Everything about a draft that is worth surviving a process restart.
+  ///
+  /// The lines themselves are NOT in here: the basket lives in the `cart_items`
+  /// table, so on restore they are read back from the cart (see
+  /// [_PaymentDraftStore.restore]) rather than written to disk from a shape the
+  /// app would then have to keep in sync.
+  Map<String, dynamic> toSnapshot() => {
+        'provider_id': providerId,
+        'provider_name': providerName,
+        'product_ids': items.map((i) => i.productId).toList(),
+        'fulfillment_mode': fulfillmentMode,
+        'delivery_address': deliveryAddress,
+        'delivery_lat': deliveryLat,
+        'delivery_lng': deliveryLng,
+        'delivery_vehicle_id': deliveryVehicleId,
+        'delivery_vehicle_name': deliveryVehicleName,
+        'delivery_fee': deliveryFee,
+        'delivery_distance_km': deliveryDistanceKm,
+        'payment_deferred': paymentDeferred,
+      };
+}
+
+/// WHY THIS EXISTS — the payment step losing its draft mid-flow.
+///
+/// The draft was passed as GoRouter `extra` and nowhere else. `extra` is not
+/// serialisable, so it survives a widget rebuild but NOT the route being
+/// re-parsed: the buyer taps the proof-of-payment photo, the gallery opens
+/// outside the app, and if Android recreates the activity the router rebuilds
+/// `/user/payment` from its location alone. The screen then rendered
+/// `draft == null` — "There is nothing to pay for yet" with a GO TO CART
+/// button — right at the moment of paying, with a half-filled form behind it.
+///
+/// This writes the draft's decisions to a small JSON file on first build and
+/// reads them back when the route arrives empty, re-reading the basket from
+/// the cart. It is cleared on a normal pop and after the order is placed, so
+/// what it holds is only ever "the payment the buyer was in the middle of",
+/// never a finished one.
+class _PaymentDraftStore {
+  static const _name = 'in_progress_payment_draft.json';
+
+  static Future<File> _target() async {
+    final dir = await getApplicationDocumentsDirectory();
+    return File('${dir.path}/$_name');
+  }
+
+  static Future<void> save(OrderDraft draft) async {
+    if (draft.items.isEmpty) return;
+    try {
+      final file = await _target();
+      await file.writeAsString(jsonEncode(draft.toSnapshot()), flush: true);
+    } catch (_) {
+      // Best-effort: the in-memory draft is still what the running screen uses.
+    }
+  }
+
+  static Future<void> clear() async {
+    try {
+      final file = await _target();
+      if (await file.exists()) await file.delete();
+    } catch (_) {
+      // A leftover file is only restored when a draft is missing anyway.
+    }
+  }
+
+  /// Rebuild a draft from disk, or null when there is nothing real to rebuild:
+  /// no file, an unreadable file, or lines that are no longer in the cart
+  /// (the order was already placed). Null keeps the honest "nothing to pay
+  /// for" state instead of resurrecting a stale form.
+  static Future<OrderDraft?> restore() async {
+    try {
+      final file = await _target();
+      if (!await file.exists()) return null;
+      final raw = jsonDecode(await file.readAsString());
+      if (raw is! Map<String, dynamic>) return null;
+      final providerId = raw['provider_id'] as String?;
+      if (providerId == null || providerId.isEmpty) return null;
+      final wanted = ((raw['product_ids'] as List?) ?? const [])
+          .map((e) => '$e')
+          .toSet();
+      final cart = await CartService.instance.getCart();
+      final items = cart
+          .where((i) =>
+              i.providerId == providerId && wanted.contains(i.productId))
+          .toList();
+      if (items.isEmpty) return null;
+      return OrderDraft(
+        providerId: providerId,
+        providerName:
+            (raw['provider_name'] as String?)?.isNotEmpty == true
+                ? raw['provider_name'] as String
+                : 'The provider',
+        items: items,
+        fulfillmentMode:
+            (raw['fulfillment_mode'] as String?) ?? 'SELF_PICKUP',
+        deliveryAddress: (raw['delivery_address'] as String?) ?? '',
+        deliveryLat: (raw['delivery_lat'] as num?)?.toDouble(),
+        deliveryLng: (raw['delivery_lng'] as num?)?.toDouble(),
+        deliveryVehicleId: raw['delivery_vehicle_id'] as String?,
+        deliveryVehicleName: raw['delivery_vehicle_name'] as String?,
+        deliveryFee: (raw['delivery_fee'] as num?)?.toDouble() ?? 0,
+        deliveryDistanceKm:
+            (raw['delivery_distance_km'] as num?)?.toDouble(),
+        paymentDeferred: (raw['payment_deferred'] as bool?) ?? false,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
 }
 
 /// THE PAYMENT STEP — its own screen, after the fulfillment choice is
@@ -157,7 +268,14 @@ class _UserPaymentScreenState extends ConsumerState<UserPaymentScreen> {
 
   SupabaseClient get _client => Supabase.instance.client;
 
-  OrderDraft? get _draft => widget.draft;
+  /// The draft rebuilt from disk when the route arrived without one. Null
+  /// while it is still being read (covered by [_loading]), and null when there
+  /// was nothing worth restoring.
+  OrderDraft? _restored;
+
+  /// `extra` first — that is the live draft for a normal in-app navigation.
+  /// The disk copy only stands in when `extra` was lost to a route rebuild.
+  OrderDraft? get _draft => widget.draft ?? _restored;
 
   @override
   void initState() {
@@ -170,18 +288,31 @@ class _UserPaymentScreenState extends ConsumerState<UserPaymentScreen> {
       // this records what they transferred, it does not set the charge.
       _amountCtrl.text = draft.payableTotal.toStringAsFixed(2);
       _amountPrefilled = true;
+      // Written before the buyer is one tap from the gallery, because that is
+      // exactly when the route can be thrown away and rebuilt.
+      _PaymentDraftStore.save(draft);
     }
     _load();
   }
 
   @override
   void dispose() {
+    // Popped deliberately (back, or the VIEW ORDER hand-off) → the in-progress
+    // copy is no longer wanted. An activity kill skips dispose, which is the
+    // whole point of the file existing.
+    _PaymentDraftStore.clear();
     _refCtrl.dispose();
     _amountCtrl.dispose();
     super.dispose();
   }
 
   Future<void> _load() async {
+    // No `extra` means the route was rebuilt without the draft. Read it back
+    // before the spinner drops, so the buyer never sees the empty state flash
+    // over the form they were filling in.
+    if (widget.draft == null) {
+      _restored = await _PaymentDraftStore.restore();
+    }
     await _refreshProviderReadiness();
     // Whether this buyer still needs to give a National ID. Users sign up with
     // only email/phone/password, so the ID is verified at the first purchase —
@@ -438,6 +569,10 @@ class _UserPaymentScreenState extends ConsumerState<UserPaymentScreen> {
       } catch (_) {
         cartIssue = true;
       }
+      // The draft is spent. Dropping it here means a route rebuild after this
+      // point can only ever show "nothing to pay for" for a reason that is
+      // true, never a form for an order that already exists.
+      await _PaymentDraftStore.clear();
 
       if (!mounted) return;
       setState(() => _submitting = false);
@@ -514,6 +649,18 @@ class _UserPaymentScreenState extends ConsumerState<UserPaymentScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Loading first: while the route's `extra` is missing, the disk copy is
+    // still being read. Rendering the empty state before that resolves is
+    // exactly the "it sent me to the cart" failure — the form it was about to
+    // show flashes behind a GO TO CART page.
+    if (_loading) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Payment')),
+        body:
+            const Center(child: CircularProgressIndicator(color: AppTheme.primaryGreen)),
+      );
+    }
+
     final draft = _draft;
 
     if (draft == null || draft.items.isEmpty) {
@@ -548,10 +695,7 @@ class _UserPaymentScreenState extends ConsumerState<UserPaymentScreen> {
 
     return Scaffold(
       appBar: AppBar(title: const Text('Payment')),
-      body: _loading
-          ? const Center(
-              child: CircularProgressIndicator(color: AppTheme.primaryGreen))
-          : SingleChildScrollView(
+      body: SingleChildScrollView(
               padding: const EdgeInsets.all(20),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,

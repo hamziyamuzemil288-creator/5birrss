@@ -4,7 +4,7 @@ All notable changes to Aliob (All In One Business). The version name and
 versionCode here match `pubspec.yaml`'s `version:` line and
 `lib/core/app_build.dart` (pinned by `test/forced_update_gate_test.dart`).
 
-## 1.9.4+133 - 2026-10-30
+## 1.9.5+134 - 2026-10-30
 
 ### Buying one product means buying one product
 
@@ -24,15 +24,29 @@ versionCode here match `pubspec.yaml`'s `version:` line and
 - Orders now carries a **Track** action on every delivery order inside the
   escrow window (APPROVED / STARTED), opening the live GPS map for the
   assigned driver — the same window `get_delivery_tracking` enforces, so the
-  button never lands on a refusal.
-
-### Notifications
+  button never lands on a refusal.### Notifications
 
 - The home bell shows an unread count (`9+` past nine), so notifications that
-  are already being written and delivered are visible without opening the
-  inbox.
+are already being written and delivered are visible without opening the
+ inbox.
 - The inbox gains **Mark all read**, scoped to the signed-in account's own
-  unread rows, and reading a row refreshes the badge on the same tap.
+ unread rows, and reading a row refreshes the badge on the same tap.
+
+### Bug fixes in this release
+
+- The payment step no longer loses the order draft when the route is rebuilt
+  (for example while the payment screenshot gallery is open). The draft's
+  decisions are saved to disk and read back when the route arrives empty, so
+  the page finishes its job instead of falling back to "GO TO CART".
+- The order detail page opens again when a resubmission left more than one
+  payment-proof row on an order. The proof is now read as a list (newest
+  first, one result) and the only fatal thing is that the order itself cannot
+  be read — every other detail on the page fails on its own instead of wiping
+  the whole page.
+- The top-of-screen system banner now announces something on every app open
+  instead of going silent whenever there is nothing unread: unread count when
+  there is one, the latest recent notification when there isn't, and a welcome
+  when there is nothing at all.
 
 ## 1.9.3+132 - 2026-10-27
 
