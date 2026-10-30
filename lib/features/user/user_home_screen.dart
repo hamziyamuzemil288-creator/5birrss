@@ -21,6 +21,10 @@ import '../../core/widgets/product_card.dart';
 import '../../core/widgets/shimmer_effect.dart';
 import 'city_switcher_sheet.dart';
 import 'user_category_group_screen.dart';
+// The bell's badge reads this screen's own provider, so the count and the
+// inbox can never disagree about what "unread" means.
+import 'user_notifications_screen.dart' show unreadNotificationsCountProvider;
+import '../../core/widgets/system_banner.dart';
 
 /// The user home:
 ///
@@ -139,6 +143,36 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
     super.initState();
     _cityService.addListener(_onBrowseCityChanged);
     _load();
+    _announceUnreadOnce();
+  }
+
+  /// True once this process has greeted the reader. A static rather than a
+  /// field because the home screen is rebuilt on every tab switch, and a
+  /// banner per rebuild is a banner nobody reads.
+  static bool _greeted = false;
+
+  /// "You have N new updates" — the in-app half of "notifications must appear
+  /// when the app opens".
+  ///
+  /// The rows already exist by the time this runs: the server writes them for
+  /// orders, payments, availability answers and account events, and the bell's
+  /// badge counts them. What was missing was the app SAYING so on open, which
+  /// is why a working inbox read as a silent feature. The banner is the same
+  /// one signup uses, it is non-blocking, and it is shown at most once per app
+  /// run — the inbox and the badge stay the durable record.
+  Future<void> _announceUnreadOnce() async {
+    if (_greeted) return;
+    _greeted = true;
+    try {
+      final count = await ref.read(unreadNotificationsCountProvider.future);
+      if (!mounted || count <= 0) return;
+      SystemBannerController.instance.show(
+        title: count == 1 ? 'You have 1 new update' : 'You have $count new updates',
+        message: 'Open the bell at the top to read them.',
+      );
+    } catch (_) {
+      // A greeting is never worth an error.
+    }
   }
 
   /// Re-query for whichever city is active now. [CityService] only notifies
@@ -759,10 +793,20 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
               // existing /admin-notifications route hosts the inbox for every
               // role, so the bell reuses it rather than adding a fifth tab
               // back.
+              // The count is what makes the bell a notification centre rather
+              // than a decoration: unread rows are written by the server for
+              // orders, payments, availability answers and account events, and
+              // until the badge existed nothing on the home screen said so.
               _HeaderIcon(
                 icon: Icons.notifications_none_rounded,
                 tooltip: 'Notifications',
-                onTap: () => context.push('/admin-notifications'),
+                badgeCount:
+                    ref.watch(unreadNotificationsCountProvider).valueOrNull ?? 0,
+                onTap: () async {
+                  await context.push('/admin-notifications');
+                  // Coming back, the badge must reflect what was just read.
+                  ref.invalidate(unreadNotificationsCountProvider);
+                },
               ),
               _HeaderIcon(
                 icon: Icons.search_rounded,
@@ -1658,11 +1702,16 @@ class _HeaderIcon extends StatelessWidget {
     required this.icon,
     required this.onTap,
     required this.tooltip,
+    this.badgeCount = 0,
   });
 
   final IconData icon;
   final VoidCallback onTap;
   final String tooltip;
+
+  /// Unread notifications, drawn as a superscript count. Zero hides it, so a
+  /// caught-up inbox looks like an ordinary icon rather than a "0".
+  final int badgeCount;
 
   @override
   Widget build(BuildContext context) {
@@ -1679,7 +1728,37 @@ class _HeaderIcon extends StatelessWidget {
             child: SizedBox(
               width: 38,
               height: 38,
-              child: Icon(icon, color: Colors.white, size: 20),
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  Icon(icon, color: Colors.white, size: 20),
+                  if (badgeCount > 0)
+                    Positioned(
+                      top: 6,
+                      right: 5,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 4, vertical: 1),
+                        constraints: const BoxConstraints(minWidth: 14),
+                        decoration: BoxDecoration(
+                          color: AppTheme.error,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.white, width: 1.2),
+                        ),
+                        child: Text(
+                          badgeCount > 9 ? '9+' : '$badgeCount',
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            fontSize: 8.5,
+                            height: 1.25,
+                            fontWeight: FontWeight.w800,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
             ),
           ),
         ),

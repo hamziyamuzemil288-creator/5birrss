@@ -43,12 +43,23 @@ import '../../core/widgets/primary_button.dart';
 /// again, enforced by create_order_secure regardless of what this screen
 /// does.
 class UserAvailabilityScreen extends StatefulWidget {
-  const UserAvailabilityScreen({super.key, required this.providerId});
+  const UserAvailabilityScreen({
+    super.key,
+    required this.providerId,
+    this.productIds = const [],
+  });
 
   /// The provider whose stock is being asked about, carried as route `extra`
   /// exactly like `/user/checkout`. Empty is tolerated (a stale deep link):
   /// the screen then derives it from the buyer's cart.
   final String providerId;
+
+  /// The listing(s) the buyer actually selected — the tap on Buy/Book passes
+  /// exactly one. It is the DEFAULT selection, not a restriction: a buyer who
+  /// wants more of this provider's basket can tick more lines here, which is
+  /// why the ask panel draws a picker instead of silently asking about
+  /// everything in the cart.
+  final List<String> productIds;
 
   @override
   State<UserAvailabilityScreen> createState() =>
@@ -58,6 +69,16 @@ class UserAvailabilityScreen extends StatefulWidget {
 enum _GatePhase { loading, error, empty, ask, waiting, rejected, accepted }
 
 class _UserAvailabilityScreenState extends State<UserAvailabilityScreen> {
+  /// Every line this buyer has from this provider — the full basket the
+  /// picker below is drawn from. Never ordered from directly: [_items] is.
+  List<CartItem> _providerCart = [];
+
+  /// The product ids the buyer is asking about right now. Seeded from
+  /// [UserAvailabilityScreen.productIds] (the tapped listing) and changed only
+  /// by the picker, so "which products am I buying" is one piece of state and
+  /// the gate, the ask call and the checkout behind it all read it.
+  Set<String> _selectedIds = <String>{};
+
   List<CartItem> _items = [];
   List<Map<String, dynamic>> _rows = [];
   String _providerId = '';
@@ -103,6 +124,35 @@ class _UserAvailabilityScreenState extends State<UserAvailabilityScreen> {
   List<String> get _productIds =>
       _items.map((i) => i.productId).toSet().toList();
 
+  /// What checkout is handed: the provider AND the lines the buyer ticked.
+  /// One map for both callers, so the order can never be larger than the
+  /// request the provider answered.
+  Map<String, dynamic> _checkoutExtra() => {
+        'providerId': _providerId,
+        'productIds': _productIds,
+      };
+
+  /// Tick or untick one line of this provider's basket.
+  ///
+  /// Rows are re-read rather than guessed at: a newly ticked line may already
+  /// have an ACCEPTED answer from an earlier visit, and the phase must follow
+  /// the ROW, not the checkbox. The tick itself is applied first so the picker
+  /// responds immediately.
+  Future<void> _toggleSelection(String productId) async {
+    if (_asking) return;
+    final next = Set<String>.from(_selectedIds);
+    if (!next.remove(productId)) next.add(productId);
+    if (next.isEmpty) return; // never "buy nothing"
+    setState(() {
+      _selectedIds = next;
+      _items = _providerCart
+          .where((i) => next.contains(i.productId))
+          .toList();
+      _remainingSeconds = 0;
+    });
+    await _refreshRows();
+  }
+
   @override
   void initState() {
     super.initState();
@@ -123,12 +173,13 @@ class _UserAvailabilityScreenState extends State<UserAvailabilityScreen> {
     });
     try {
       final all = await CartService.instance.getCart();
-      final items = widget.providerId.isEmpty
+      final cart = widget.providerId.isEmpty
           ? all
           : all.where((i) => i.providerId == widget.providerId).toList();
-      if (items.isEmpty) {
+      if (cart.isEmpty) {
         if (mounted) {
           setState(() {
+            _providerCart = [];
             _items = [];
             _loading = false;
           });
@@ -137,8 +188,31 @@ class _UserAvailabilityScreenState extends State<UserAvailabilityScreen> {
       }
       _providerId = widget.providerId.isNotEmpty
           ? widget.providerId
-          : items.first.providerId;
-      _items = items;
+          : cart.first.providerId;
+      _providerCart = cart;
+      // THE DEFAULT IS THE SELECTED PRODUCT.
+      //
+      // The tapped listing (if there is one) is the only line asked about and
+      // the only line ordered. Everything else in this provider's basket is
+      // offered in the picker but stays UNCHECKED, so a buyer who once added
+      // three things and is now buying one gets that one.
+      if (_selectedIds.isEmpty) {
+        final wanted = widget.productIds.toSet();
+        final preselected =
+            cart.where((i) => wanted.contains(i.productId)).toSet();
+        _selectedIds = preselected.isNotEmpty
+            ? preselected.map((i) => i.productId).toSet()
+            : cart.map((i) => i.productId).toSet();
+      } else {
+        // A reload must not resurrect a line the buyer unticked.
+        _selectedIds = _selectedIds
+            .where((id) => cart.any((i) => i.productId == id))
+            .toSet();
+        if (_selectedIds.isEmpty) {
+          _selectedIds = cart.map((i) => i.productId).toSet();
+        }
+      }
+      _items = cart.where((i) => _selectedIds.contains(i.productId)).toList();
       await _refreshRows();
       if (mounted) setState(() => _loading = false);
       _subscribe();
@@ -321,7 +395,7 @@ class _UserAvailabilityScreenState extends State<UserAvailabilityScreen> {
     if (phase == _GatePhase.accepted) {
       _navigated = true;
       _ticker?.cancel();
-      context.pushReplacement('/user/checkout', extra: _providerId);
+      context.pushReplacement('/user/checkout', extra: _checkoutExtra());
       return;
     }
     if (phase == _GatePhase.waiting) {
@@ -438,7 +512,7 @@ class _UserAvailabilityScreenState extends State<UserAvailabilityScreen> {
                 'continuing to checkout.'),
           ),
         );
-        context.pushReplacement('/user/checkout', extra: _providerId);
+        context.pushReplacement('/user/checkout', extra: _checkoutExtra());
         return;
       }
       setState(() => _asking = false);
@@ -579,11 +653,82 @@ class _UserAvailabilityScreenState extends State<UserAvailabilityScreen> {
   static String _fmtQty(double q) =>
       q == q.roundToDouble() ? q.toInt().toString() : q.toString();
 
+  /// What is being asked about, and how much of it.
+  ///
+  /// Shown only when this provider's basket has more than one line: with a
+  /// single line there is nothing to decide. Each row is the buyer's own
+  /// choice — the tapped listing starts ticked, the rest start unticked — so
+  /// "all products in stock" is never what gets ordered by accident.
+  Widget _selectionCard() {
+    if (_providerCart.length < 2) return const SizedBox.shrink();
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 6),
+      decoration: BoxDecoration(
+        color: AppTheme.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppTheme.cardBorder),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Expanded(
+                child: Text('What do you want to buy?',
+                    style: TextStyle(
+                        fontSize: 13, fontWeight: FontWeight.w700)),
+              ),
+              if (_selectedIds.length < _providerCart.length)
+                TextButton(
+                  onPressed: () {
+                    setState(() {
+                      _selectedIds =
+                          _providerCart.map((i) => i.productId).toSet();
+                      _items = List<CartItem>.from(_providerCart);
+                    });
+                    _refreshRows();
+                  },
+                  style: TextButton.styleFrom(
+                    padding: EdgeInsets.zero,
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  child: const Text('Select all',
+                      style: TextStyle(fontSize: 12)),
+                ),
+            ],
+          ),
+          for (final item in _providerCart)
+            CheckboxListTile(
+              value: _selectedIds.contains(item.productId),
+              onChanged: (_) => _toggleSelection(item.productId),
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              controlAffinity: ListTileControlAffinity.leading,
+              title: Text(item.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      fontSize: 13, fontWeight: FontWeight.w500)),
+              subtitle: Text(
+                '${_fmtQty(item.quantity)} ${item.unit != null ? item.unitLabel : '×'} '
+                '· ${item.lineTotal.toStringAsFixed(2)} ${item.currency}',
+                style: const TextStyle(fontSize: 11.5),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
   Widget _askPanel() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         _basket(),
+        const SizedBox(height: 16),
+        _selectionCard(),
         const SizedBox(height: 24),
         const Icon(Icons.help_outline, size: 44, color: AppTheme.teal),
         const SizedBox(height: 12),

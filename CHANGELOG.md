@@ -4,6 +4,36 @@ All notable changes to Aliob (All In One Business). The version name and
 versionCode here match `pubspec.yaml`'s `version:` line and
 `lib/core/app_build.dart` (pinned by `test/forced_update_gate_test.dart`).
 
+## 1.9.4+133 - 2026-10-30
+
+### Buying one product means buying one product
+
+- Tapping Buy/Book on a listing no longer opens the gate (and the checkout
+  behind it) for the buyer's whole basket from that provider. The tapped
+  listing is the pre-selected line, and the availability screen now draws a
+  picker — "What do you want to buy?" — with the selection as the default, so
+  a buyer chooses one line or several on purpose.
+- `/user/checkout` accepts `productIds` and filters the order to those lines;
+  the cart's own CHECKOUT passes none, which keeps "everything from this
+  provider" working exactly as before.
+- Placing an order removes only the lines that were ordered from the cart
+  instead of emptying it, so the lines the buyer did not buy survive.
+
+### Delivery tracking for buyers
+
+- Orders now carries a **Track** action on every delivery order inside the
+  escrow window (APPROVED / STARTED), opening the live GPS map for the
+  assigned driver — the same window `get_delivery_tracking` enforces, so the
+  button never lands on a refusal.
+
+### Notifications
+
+- The home bell shows an unread count (`9+` past nine), so notifications that
+  are already being written and delivered are visible without opening the
+  inbox.
+- The inbox gains **Mark all read**, scoped to the signed-in account's own
+  unread rows, and reading a row refreshes the badge on the same tap.
+
 ## 1.9.3+132 - 2026-10-27
 
 ## 1.9.3+130 — 2026-10-27

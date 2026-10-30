@@ -46,6 +46,18 @@ class _UserOrdersScreenState extends State<UserOrdersScreen> {
     }
   }
 
+  /// A delivery order whose tracking the buyer may open right now.
+  ///
+  /// Exactly the window `get_delivery_tracking` accepts on the buyer side: a
+  /// DELIVERY order, past payment verification, and not yet finished. Asking
+  /// for anything wider would put a button on the list that the server then
+  /// refuses.
+  bool _trackable(Map<String, dynamic> o) {
+    if ((o['fulfillment_mode'] as String?) != 'DELIVERY') return false;
+    final status = (o['status'] ?? '').toString();
+    return status == 'APPROVED' || status == 'STARTED';
+  }
+
   Color _statusColor(String status) {
     switch (status) {
       case 'PENDING':
@@ -141,20 +153,61 @@ class _UserOrdersScreenState extends State<UserOrdersScreen> {
                             ],
                           ),
                         ),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 10, vertical: 4),
-                          decoration: BoxDecoration(
-                            color: color.withOpacity(0.1),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Text(
-                            status,
-                            style: TextStyle(
-                                fontSize: 11,
-                                fontWeight: FontWeight.w600,
-                                color: color),
-                          ),
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 10, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: color.withOpacity(0.1),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Text(
+                                status,
+                                style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w600,
+                                    color: color),
+                              ),
+                            ),
+                            // The buyer's way into the live delivery map, from
+                            // the list — without it the tracking screen was
+                            // only reachable by opening the order first, so a
+                            // buyer watching a parcel had to remember where
+                            // it lived. Same window the RPC enforces
+                            // (APPROVED/STARTED and a delivery order), so this
+                            // button is never a dead end.
+                            if (_trackable(o)) ...[
+                              const SizedBox(height: 6),
+                              InkWell(
+                                borderRadius: BorderRadius.circular(8),
+                                onTap: () => context.push(
+                                    '/user/orders/${o['id']}/delivery'),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 8, vertical: 4),
+                                  decoration: BoxDecoration(
+                                    color: AppTheme.teal.withOpacity(0.1),
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: const Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(Icons.share_location_rounded,
+                                          size: 13, color: AppTheme.teal),
+                                      SizedBox(width: 4),
+                                      Text('Track',
+                                          style: TextStyle(
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.w700,
+                                              color: AppTheme.teal)),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ],
                         ),
                       ],
                     ),

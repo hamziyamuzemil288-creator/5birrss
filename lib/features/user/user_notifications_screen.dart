@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../core/theme/app_theme.dart';
@@ -64,14 +65,40 @@ String? notificationTargetPath(
   return null;
 }
 
-class UserNotificationsScreen extends StatefulWidget {
+/// How many of this account's notifications are unread.
+///
+/// One query, used by the bell in every dashboard header. It exists because a
+/// bell with no count is indistinguishable from a dead feature: notifications
+/// were being written and delivered, but nothing on screen said so until the
+/// reader opened the inbox and scrolled. Zero on any failure or when signed
+/// out — a badge is never worth an error.
+///
+/// Invalidate it after reading a row (see `_open`) so the badge clears on the
+/// same tap that marks it read.
+final unreadNotificationsCountProvider = FutureProvider<int>((ref) async {
+  final uid = Supabase.instance.client.auth.currentUser?.id;
+  if (uid == null) return 0;
+  try {
+    final rows = await Supabase.instance.client
+        .from('notifications')
+        .select('id')
+        .eq('user_id', uid)
+        .eq('is_read', false);
+    return (rows as List).length;
+  } catch (_) {
+    return 0;
+  }
+});
+
+class UserNotificationsScreen extends ConsumerStatefulWidget {
   const UserNotificationsScreen({super.key});
   @override
-  State<UserNotificationsScreen> createState() =>
+  ConsumerState<UserNotificationsScreen> createState() =>
       _UserNotificationsScreenState();
 }
 
-class _UserNotificationsScreenState extends State<UserNotificationsScreen> {
+class _UserNotificationsScreenState
+    extends ConsumerState<UserNotificationsScreen> {
 
   @override
   void initState() {
@@ -125,6 +152,36 @@ class _UserNotificationsScreenState extends State<UserNotificationsScreen> {
     }
   }
 
+  bool _markingAll = false;
+
+  /// Mark every unread row of the signed-in account read, then refresh.
+  ///
+  /// Scoped by `user_id` as well as `is_read` on purpose: RLS already limits
+  /// this reader to their own rows, and the explicit filter means a future
+  /// policy change cannot turn this into a blanket UPDATE.
+  Future<void> _markAllRead() async {
+    if (_markingAll) return;
+    final uid = Supabase.instance.client.auth.currentUser?.id;
+    if (uid == null) return;
+    setState(() => _markingAll = true);
+    try {
+      await Supabase.instance.client
+          .from('notifications')
+          .update({
+            'is_read': true,
+            'read_at': DateTime.now().toUtc().toIso8601String(),
+          })
+          .eq('user_id', uid)
+          .eq('is_read', false);
+      ref.invalidate(unreadNotificationsCountProvider);
+    } catch (_) {
+      // Best-effort: a failed sweep leaves the rows unread, which is the
+      // truthful state and is still readable on the next open.
+    } finally {
+      if (mounted) setState(() => _markingAll = false);
+    }
+  }
+
   /// Mark the row read, then follow the payload.
   ///
   /// The mark happens FIRST and is never awaited before the navigation. A
@@ -141,6 +198,8 @@ class _UserNotificationsScreenState extends State<UserNotificationsScreen> {
       } catch (_) {
         // Best-effort; the navigation below is the part that matters.
       }
+      // The badge counts unread rows, so it is wrong the moment one is read.
+      ref.invalidate(unreadNotificationsCountProvider);
     }
 
     final path = notificationTargetPath(
@@ -171,7 +230,19 @@ class _UserNotificationsScreenState extends State<UserNotificationsScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Notifications')),
+      appBar: AppBar(
+        title: const Text('Notifications'),
+        actions: [
+          // One tap clears the badge. It marks the same rows the list shows
+          // (the reader's own, unread) and nothing else, so it cannot be used
+          // to hide somebody else's notification.
+          TextButton(
+            onPressed: _markAllRead,
+            child: const Text('Mark all read',
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+          ),
+        ],
+      ),
       body: RefreshIndicator(
         onRefresh: _load,
         color: AppTheme.primaryGreen,

@@ -559,7 +559,13 @@ class _State extends ConsumerState<UserProductDetailScreen> {
       if (providerId != null) {
         // Through the availability gate, never straight to payment: the
         // provider has to say the item exists before the checkout opens.
-        context.push('/user/availability', extra: {'providerId': providerId});
+        // `productIds` is THIS listing, so the gate and the order behind it
+        // are about the thing on this page — not the buyer's whole basket
+        // from the same provider.
+        context.push('/user/availability', extra: {
+          'providerId': providerId,
+          'productIds': [widget.productId],
+        });
       } else {
         context.push('/user/cart');
       }

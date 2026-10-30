@@ -452,7 +452,27 @@ final appRouterProvider = Provider<GoRouter>((ref) {
           path: '/user/notification-settings',
           builder: (_, __) => const NotificationSettingsScreen()),
       GoRoute(path: '/user/cart', builder: (_, __) => const UserCartScreen()),
-      GoRoute(path: '/user/checkout', builder: (_, s) => UserCheckoutScreen(providerId: s.extra as String)),
+      // `extra` is either the provider id on its own (the cart's CHECKOUT, and
+      // every older caller) or a map that also names WHICH lines to buy. The
+      // second form is what "buy this one product" passes: without it checkout
+      // priced the buyer's whole basket for that provider, which is not what
+      // tapping Buy on one listing means.
+      GoRoute(
+        path: '/user/checkout',
+        builder: (_, s) {
+          final extra = s.extra;
+          if (extra is Map) {
+            return UserCheckoutScreen(
+              providerId: extra['providerId'] as String? ?? '',
+              productIds: ((extra['productIds'] as List?) ?? const [])
+                  .map((e) => '$e')
+                  .toList(),
+            );
+          }
+          return UserCheckoutScreen(
+              providerId: extra is String ? extra : '');
+        },
+      ),
       // The payment step, reached from checkout once the fulfillment choice is
       // settled: the platform's account, what the buyer wrote down, the proof
       // of payment and the place-order call. The draft arrives as `extra`; a
@@ -471,7 +491,14 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         builder: (_, s) {
           final args = (s.extra as Map?) ?? const {};
           return UserAvailabilityScreen(
-              providerId: args['providerId'] as String? ?? '');
+            providerId: args['providerId'] as String? ?? '',
+            // The product the buyer tapped, when there is one. It becomes the
+            // pre-selected line on the gate, so "is this available?" is asked
+            // about the thing they chose rather than everything in the basket.
+            productIds: ((args['productIds'] as List?) ?? const [])
+                .map((e) => '$e')
+                .toList(),
+          );
         },
       ),
       GoRoute(

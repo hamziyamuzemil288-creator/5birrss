@@ -15,7 +15,22 @@ import 'user_payment_screen.dart';
 
 class UserCheckoutScreen extends ConsumerStatefulWidget {
   final String providerId;
-  const UserCheckoutScreen({super.key, required this.providerId});
+
+  /// The lines this checkout is for. Empty means "everything this buyer has
+  /// from this provider", which is what the cart's own CHECKOUT means; a
+  /// non-empty list is the buyer's explicit choice from the availability gate
+  /// (a single tapped listing, or several they ticked).
+  ///
+  /// It is applied by filtering the cart read below, so the order the payment
+  /// screen submits can never be bigger than what the provider was asked
+  /// about.
+  final List<String> productIds;
+
+  const UserCheckoutScreen({
+    super.key,
+    required this.providerId,
+    this.productIds = const [],
+  });
   @override
   ConsumerState<UserCheckoutScreen> createState() => _UserCheckoutScreenState();
 }
@@ -167,8 +182,15 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
   Future<void> _load() async {
     try {
       final all = await CartService.instance.getCart();
-      final items =
+      final forProvider =
           all.where((i) => i.providerId == widget.providerId).toList();
+      // The buyer's selection wins. Falling back to the whole provider basket
+      // only when no selection was passed keeps the cart's own CHECKOUT
+      // working exactly as it did.
+      final wanted = widget.productIds.toSet();
+      final items = wanted.isEmpty
+          ? forProvider
+          : forProvider.where((i) => wanted.contains(i.productId)).toList();
       // Read the provider's name for the payment step's header.
       await _loadProviderName();
       // Item H: the platform commission this order will incur, through the SAME
@@ -256,8 +278,10 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
             }
           }
           if (mounted && !cleared.containsAll(ids)) {
-            context.pushReplacement('/user/availability',
-                extra: {'providerId': widget.providerId});
+            context.pushReplacement('/user/availability', extra: {
+              'providerId': widget.providerId,
+              'productIds': ids,
+            });
             return;
           }
         } catch (_) {

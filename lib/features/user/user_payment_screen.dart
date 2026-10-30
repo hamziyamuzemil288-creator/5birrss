@@ -422,9 +422,18 @@ class _UserPaymentScreenState extends ConsumerState<UserPaymentScreen> {
         }
       }
 
+      // Only the lines that were actually ordered leave the cart.
+      //
+      // This used to clear the whole basket. That was harmless while an order
+      // always meant "everything from this provider", but a buyer can now buy
+      // one listing out of several, and emptying the cart would have silently
+      // deleted the lines they deliberately did not buy. Removing by product id
+      // is exactly the `removeFromCart` the cart screen itself uses.
       var cartIssue = false;
       try {
-        await CartService.instance.clearCart();
+        for (final item in draft.items) {
+          await CartService.instance.removeFromCart(item.productId);
+        }
         ref.invalidate(cartCountProvider);
       } catch (_) {
         cartIssue = true;

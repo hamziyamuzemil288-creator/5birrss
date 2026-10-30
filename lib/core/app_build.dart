@@ -27,9 +27,9 @@ library;
 /// own `package:flutter/services.dart` exports `appBuildNumber`, `appVersion`
 /// and friends, and a bare `appBuildNumber` here would collide at every import
 /// site that pulls in both.
-const String kAppVersionName = '1.9.3';
+const String kAppVersionName = '1.9.4';
 
 /// The build number from `pubspec.yaml`'s `version:` line (`1.6.4+106`), i.e.
 /// the part after the `+`. Sent to the server as the `x-client-build` header
 /// and compared against `app_release_config.min_required_build`.
-const int kAppBuildNumber = 132;
+const int kAppBuildNumber = 133;

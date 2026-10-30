@@ -92,10 +92,13 @@ class _ProductBuyButtonState extends ConsumerState<ProductBuyButton> {
       if (!mounted) return;
       // The gate first: no buyer reaches payment without the provider's YES.
       // The provider id is the argument both this screen and the checkout
-      // behind it read, so the cart's line for this listing is already what
-      // they both work from.
-      context.push('/user/availability',
-          extra: {'providerId': widget.providerId});
+      // behind it read, and `productIds` names THE listing just tapped — the
+      // gate opens on that line alone, so tapping Buy on one product never
+      // turns into an order for everything else in the basket.
+      context.push('/user/availability', extra: {
+        'providerId': widget.providerId,
+        'productIds': [widget.productId],
+      });
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
