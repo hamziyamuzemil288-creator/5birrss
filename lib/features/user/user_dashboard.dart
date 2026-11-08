@@ -308,7 +308,7 @@ class _GuestTab extends StatelessWidget {
                         borderRadius: BorderRadius.circular(12),
                       ),
                     ),
-                    child: const Text('BECOME A PROVIDER'),
+                    label: const Text('BECOME A PROVIDER'),
                   ),
                 ),
               ],
