@@ -224,6 +224,18 @@ jobs:
         if: ${{ !inputs.dry_run }}
         run: supabase functions deploy order-transition
 
+      # The admin checkout decision and the buyer's cancel both change
+      # orders.status, which the order-status guard accepts only from a server
+      # write. These endpoints authenticate the caller and run the service-role
+      # RPC; deploy them with the migrations, before the app build.
+      - name: Deploy function checkout-review
+        if: ${{ !inputs.dry_run }}
+        run: supabase functions deploy checkout-review
+
+      - name: Deploy function checkout-cancel
+        if: ${{ !inputs.dry_run }}
+        run: supabase functions deploy checkout-cancel
+
       - name: Deploy function ride-claim
         if: ${{ !inputs.dry_run }}
         run: supabase functions deploy ride-claim

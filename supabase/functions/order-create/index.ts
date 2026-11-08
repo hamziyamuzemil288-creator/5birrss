@@ -48,6 +48,16 @@ interface OrderCreateBody {
   delivery_lat?: number;
   delivery_lng?: number;
   vehicle_category_id?: string;
+  // 2026-11 marketing rework: a guest buyer has no profile worth reading at
+  // the door, so checkout sends the name and phone the delivery needs. These
+  // are additive — an older client sends none and the order is created exactly
+  // as before.
+  buyer_name?: string;
+  buyer_phone?: string;
+  buyer_note?: string;
+  // When true the order is moved to AWAITING_APPROVAL and the admin queue is
+  // notified. Old clients omit it and keep the existing PENDING_PROVIDER path.
+  request_approval?: boolean;
 }
 
 const MAX_ITEMS_PER_ORDER = 50;
@@ -253,6 +263,23 @@ Deno.serve(async (req: Request) => {
       subtotal += unitPriceOf(product) * item.quantity;
     }
 
+    // Guest checkout fields. Trimmed and length-capped here so neither a
+    // runaway client nor a pasted paragraph can reach the database, and so
+    // what the driver reads is a name and a number rather than a blob.
+    const buyerName = (body.buyer_name ?? "").toString().trim().slice(0, 120);
+    const buyerPhone = (body.buyer_phone ?? "").toString().trim().slice(0, 40);
+    const buyerNote = (body.buyer_note ?? "").toString().trim().slice(0, 1000);
+    const requestApproval = body.request_approval === true;
+
+    if (requestApproval) {
+      if (!buyerName) {
+        return json({ error: "A name is required for the delivery" }, 400);
+      }
+      if (!/^[+0-9][0-9\s-]{6,19}$/.test(buyerPhone)) {
+        return json({ error: "A valid phone number is required for the delivery" }, 400);
+      }
+    }
+
     // Phase 4: fulfillment mode (defaults to DELIVERY for old clients).
     const fulfillmentMode =
       body.fulfillment_mode === "SELF_PICKUP" ? "SELF_PICKUP" : "DELIVERY";
@@ -273,10 +300,10 @@ Deno.serve(async (req: Request) => {
     //
     // The CAP is the one refusal this function must not soften. Past
     // max_delivery_distance_km the quote comes back ok=false with
-    // BEYOND_MAX_DISTANCE, and the checkout has already bounced the buyer to
-    // self-pickup — but a client that ignores that must not be handed a free
-    // delivery at the product price, so the order is refused outright with the
-    // server's own sentence.
+    // BEYOND_MAX_DISTANCE, and the checkout has already blocked CONTINUE —
+    // but a client that ignores that must not be handed a free delivery at
+    // the product price, so the order is refused outright with the server's
+    // own sentence.
     //
     // A fee is added ONLY when the server could price this delivery. When it
     // could not — the provider has published no point, or the buyer sent no
@@ -330,7 +357,7 @@ Deno.serve(async (req: Request) => {
             {
               error:
                 beyond ??
-                "This delivery is beyond the maximum delivery distance. Choose self-pickup instead.",
+                "This delivery is beyond the maximum delivery distance we can deliver to.",
             },
             400,
           );
@@ -407,12 +434,55 @@ Deno.serve(async (req: Request) => {
       }
     }
 
+    // ── the admin checkout-approval gate ──
+    //
+    // The order exists and is priced. For the current app it now waits for an
+    // administrator: the RPC records the guest's name/phone/note, moves the
+    // order to AWAITING_APPROVAL and tells the admin queue. A failure here is
+    // logged and the order is still returned — the buyer can open it and the
+    // admin can still act on it from All Orders, which is strictly better
+    // than reporting a failure for an order that was created.
+    let awaitingApproval = false;
+    if (createdId && requestApproval) {
+      const { error: attachError } = await admin.rpc(
+        "attach_checkout_request",
+        {
+          p_order_id: createdId,
+          p_user_id: user.id,
+          p_buyer_name: buyerName,
+          p_buyer_phone: buyerPhone,
+          p_buyer_note: buyerNote,
+        },
+      );
+      if (attachError) {
+        console.error(
+          "order-create: checkout request was not attached",
+          attachError,
+        );
+      } else {
+        awaitingApproval = true;
+        const { error: notifyError } = await admin.rpc(
+          "submit_checkout_request",
+          { p_order_id: createdId },
+        );
+        if (notifyError) {
+          // The queue reads the order itself; a missing push must not undo it.
+          console.error(
+            "order-create: admin checkout notification failed",
+            notifyError,
+          );
+        }
+      }
+    }
+
     return json(
       {
         order: created,
         // Additive: the client can show what the trip cost without re-deriving
         // it. Absent (0) when the delivery could not be priced.
         delivery_fee: deliveryFee,
+        // Additive: true when the order is waiting for an admin decision.
+        awaiting_approval: awaitingApproval,
       },
       201,
     );
