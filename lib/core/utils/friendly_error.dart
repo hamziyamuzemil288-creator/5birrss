@@ -355,8 +355,45 @@ String friendlyError(Object error, {String? context}) {
   } else if (_any(lower, [
     'a_reason_is_required',
     'a_warning_needs',
+    'a_rejection_needs_a_reason',
   ])) {
     message = 'Please write a short reason first.';
+  }
+  // ── The checkout-approval gate (20261108000002) ──
+  //
+  // These are decisions an administrator can act on immediately, so each one
+  // names the next action instead of falling back to "something went wrong".
+  else if (_any(lower, ['vehicle_already_busy'])) {
+    message = 'That vehicle is already on another delivery. Choose a free '
+        'vehicle.';
+  } else if (_any(lower, ['driver_already_busy'])) {
+    message = 'That driver is already on another delivery. Choose another '
+        'driver.';
+  } else if (_any(lower, ['vehicle_is_not_available'])) {
+    message = 'That vehicle is not available right now. Choose another one.';
+  } else if (_any(lower, ['payment_proof_required'])) {
+    message = 'This order has no payment proof yet. Ask the buyer to attach '
+        'the receipt, or reject the request with a reason.';
+  } else if (_any(lower, ['checkout_request_already_decided'])) {
+    message = 'Another administrator already decided this request. Refresh '
+        'the queue.';
+  } else if (_any(lower, [
+    'approval_requires_a_vehicle_and_a_driver',
+    'driver_must_be_an_approved_vehicle_provider',
+    'vehicle_does_not_belong_to_that_driver',
+    'vehicle_does_not_match_the_chosen_type',
+  ])) {
+    message = 'Choose an approved, available vehicle from the driver\'s own '
+        'fleet.';
+  } else if (_any(lower, [
+    'only_the_buyer_may_cancel_this_request',
+    'checkout_request_can_only_be_cancelled_while_pending',
+  ])) {
+    message = 'This request can no longer be cancelled — it has already been '
+        'decided.';
+  } else if (_any(lower, ['guest_account_is_read_only'])) {
+    message = 'Guest accounts browse and order only. Sign in to manage a '
+        'business account.';
   }
   // ── Missing rows / removed records ──
   else if (_any(lower, [

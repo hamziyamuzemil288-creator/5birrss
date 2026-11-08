@@ -1,12 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../core/providers/auth_provider.dart';
+import '../../core/services/active_order_store.dart';
 import '../../core/services/guest_session.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/widgets/app_error_boundary.dart';
 import '../../core/widgets/birr_bottom_nav.dart';
-import '../../core/widgets/verification_notice.dart';
 import 'user_favorites_screen.dart';
 import 'user_home_screen.dart';
 import 'user_orders_screen.dart';
@@ -54,6 +56,44 @@ class UserDashboard extends ConsumerStatefulWidget {
 class _UserDashboardState extends ConsumerState<UserDashboard> {
   int _navIndex = 0;
   bool _initFromRoute = false;
+  bool _resumedActiveOrder = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _resumeActiveOrder();
+  }
+
+  /// The order this device was in the middle of, before it was closed.
+  ///
+  /// A guest has no account to sign back into, so without this a killed app
+  /// loses the waiting screen entirely. The stored value is an order id; the
+  /// read that follows is still scoped by RLS to the anonymous session that
+  /// placed it. Terminal orders clear the key instead of reopening it.
+  Future<void> _resumeActiveOrder() async {
+    if (_resumedActiveOrder) return;
+    _resumedActiveOrder = true;
+    final orderId = await ActiveOrderStore.read();
+    if (orderId == null || !mounted) return;
+    try {
+      final row = await Supabase.instance.client
+          .from('orders')
+          .select('id, status')
+          .eq('id', orderId)
+          .maybeSingle();
+      if (!mounted) return;
+      final status = row?['status'] as String?;
+      if (status == 'AWAITING_APPROVAL') {
+        context.go('/user/checkout/waiting/$orderId');
+      } else if (status == 'APPROVED' || status == 'STARTED') {
+        context.go('/user/orders/$orderId/delivery');
+      } else {
+        await ActiveOrderStore.clear();
+      }
+    } catch (_) {
+      // No session or no access: stay on the dashboard and keep browsing.
+    }
+  }
 
   /// Tab order matches [BirrBottomNav]: Home, Order, Favourite, Account.
   ///
@@ -92,7 +132,15 @@ class _UserDashboardState extends ConsumerState<UserDashboard> {
 
   @override
   Widget build(BuildContext context) {
-    final isGuest = ref.watch(guestModeProvider);
+    // An anonymous session is still a guest for Favourites and Account, which
+    // belong to a real profile. The ORDER tab is different: an anonymous
+    // session is a real auth subject, and the order it placed is its own row
+    // under RLS — hiding it from the buyer who just placed it would be the one
+    // place the guest model loses their order. So Orders is shown whenever a
+    // session exists, and only a visitor with no session gets the guest door.
+    final auth = ref.watch(authProvider);
+    final isGuest = ref.watch(guestModeProvider) || auth.isGuest;
+    final hasSession = auth.user != null;
 
     return AppErrorBoundary(
       screenName: 'user-dashboard',
@@ -103,7 +151,10 @@ class _UserDashboardState extends ConsumerState<UserDashboard> {
         // behind it is an owner-scoped read.
         body: Column(
           children: [
-            if (!isGuest) const VerificationNotice(),
+            // No "verify your account" banner: a buyer does not verify
+            // documents any more (migration 20261108000002 makes the guest
+            // profile APPROVED on arrival), so a reminder would point at a
+            // task the product no longer asks for.
             Expanded(
               child: IndexedStack(
                 index: _navIndex,
@@ -116,7 +167,7 @@ class _UserDashboardState extends ConsumerState<UserDashboard> {
                       key: ValueKey(
                           'tab-${_tabNames[i]}-$i-${isGuest ? 'guest' : 'member'}'),
                       screenName: 'user/${_tabNames[i]}',
-                      child: isGuest && i > 0
+                      child: isGuest && i > 0 && !(i == 1 && hasSession)
                           ? _GuestTab(index: i)
                           : _screens[i],
                     ),
@@ -151,29 +202,28 @@ class _GuestTab extends StatelessWidget {
       case 1:
         return (
           icon: Icons.receipt_long_outlined,
-          title: 'Your orders live here',
+          title: 'Track an order',
           body:
-              'Create a free account and every order, booking and ride you '
-              'place will appear on this tab — with its payment step, its '
-              'provider and its receipts.',
+              'An order you place as a guest opens its own live screen and is '
+              'remembered on this device. Sign in if you already have an '
+              'account and want its history on this tab.',
         );
       case 2:
         return (
           icon: Icons.favorite_border,
           title: 'Save what you like',
           body:
-              'Favourites are kept on your account. Browsing as a guest '
-              'works everywhere else — create an account to keep a list '
-              'across your devices.',
+              'Favourites are kept on an account. Browsing and ordering work '
+              'without one — sign in to keep a list across your devices.',
         );
       default:
         return (
           icon: Icons.person_outline,
           title: 'You are browsing as a guest',
           body:
-              'Everything in the marketplace is open to you. An account is '
-              'needed to buy, book or request a ride, and to see your orders '
-              'and account details.',
+              'Everything in the marketplace is open to you, including '
+              'checkout. Sign in if you already have an account, or open a '
+              'business account to sell on Aliob.',
         );
     }
   }
@@ -225,9 +275,11 @@ class _GuestTab extends StatelessWidget {
                 SizedBox(
                   width: double.infinity,
                   child: FilledButton.icon(
-                    onPressed: () => context.push('/signup/user'),
-                    icon: const Icon(Icons.person_add_alt_1, size: 18),
-                    label: const Text('CREATE A FREE ACCOUNT'),
+                    // A BUYER does not register any more. This is the sign-in
+                    // door for an account that already exists.
+                    onPressed: () => context.push('/login'),
+                    icon: const Icon(Icons.login, size: 18),
+                    label: const Text('SIGN IN'),
                     style: FilledButton.styleFrom(
                       backgroundColor: AppTheme.primaryGreen,
                       foregroundColor: Colors.white,
@@ -243,8 +295,9 @@ class _GuestTab extends StatelessWidget {
                 const SizedBox(height: 10),
                 SizedBox(
                   width: double.infinity,
-                  child: OutlinedButton(
-                    onPressed: () => context.go('/login'),
+                  child: OutlinedButton.icon(
+                    onPressed: () => context.push('/signup/service'),
+                    icon: const Icon(Icons.storefront_outlined, size: 18),
                     style: OutlinedButton.styleFrom(
                       foregroundColor: AppTheme.teal,
                       side: BorderSide(color: AppTheme.teal.withOpacity(0.5)),
@@ -255,7 +308,7 @@ class _GuestTab extends StatelessWidget {
                         borderRadius: BorderRadius.circular(12),
                       ),
                     ),
-                    child: const Text('I ALREADY HAVE AN ACCOUNT'),
+                    child: const Text('BECOME A PROVIDER'),
                   ),
                 ),
               ],

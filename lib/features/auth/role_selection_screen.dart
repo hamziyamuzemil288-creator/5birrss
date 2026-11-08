@@ -50,15 +50,9 @@ class RoleSelectionScreen extends StatelessWidget {
                       letterSpacing: 0.3),
                 ),
                 const SizedBox(height: 32),
-                // Role cards
-                RoleCard(
-                  icon: Icons.person_outline,
-                  title: 'User',
-                  description:
-                      'Browse products, services, and book rides in your area',
-                  onTap: () => context.go('/signup/user'),
-                ),
-                const SizedBox(height: 14),
+                // Business roles only. A buyer does not register: the
+                // dashboard is open, and checkout collects the name and phone
+                // the delivery needs under an anonymous session.
                 RoleCard(
                   icon: Icons.local_shipping_outlined,
                   title: 'Vehicle Provider',

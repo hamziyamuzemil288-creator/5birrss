@@ -121,6 +121,17 @@ class AuthState {
   }
 
   bool get isAuthenticated => user != null;
+
+  /// A guest buyer: a Supabase ANONYMOUS session.
+  ///
+  /// Since the marketing rework the first screen is the dashboard and buyers
+  /// do not register. Checkout still needs an identity — orders are scoped by
+  /// auth.uid(), push tokens are per account, and Realtime applies RLS to the
+  /// waiting screen — so the device opens an anonymous session when a purchase
+  /// starts. It is authenticated (the row is the guest's own) but it is not an
+  /// account: no sign-in screen, no documents, no provider role.
+  bool get isGuest => user?.isAnonymous ?? false;
+
   bool get isAdmin => roles.contains(AppUserRole.admin);
 
   /// True for the CEO: the owner's own account.

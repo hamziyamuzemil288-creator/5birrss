@@ -539,12 +539,10 @@ class _LiveMapScreenState extends ConsumerState<LiveMapScreen>
   Future<void> _startRideRequest() async {
     final dest = _destination;
     if (dest == null) return;
-    // GUEST INTERCEPTION — the map is a guest-open surface and this button
-    // starts a transaction. Same dialog as Buy/Book: explain, then the
-    // standard user registration. The router's transaction gate stays as
-    // the safety net for any path this misses.
-    if (ref.read(guestModeProvider)) {
-      await requestAccountToContinue(context, action: 'request a ride');
+    // The ride request needs an identity; a guest opens the anonymous one
+    // here, silently, and the flow continues.
+    if (ref.read(guestModeProvider) &&
+        !await ensureGuestCheckoutSession(context)) {
       return;
     }
     context.push('/user/ride-request', extra: {
@@ -1282,10 +1280,8 @@ class _LiveMapScreenState extends ConsumerState<LiveMapScreen>
               _drawerTile(context, Icons.directions_car_outlined, 'Request a ride', '/user/ride-request',
                   onTap: () async {
                 Navigator.of(context).pop();
-                // GUEST INTERCEPTION — same rule as the map's own ride CTA.
-                if (ref.read(guestModeProvider)) {
-                  await requestAccountToContinue(this.context,
-                      action: 'request a ride');
+                if (ref.read(guestModeProvider) &&
+                    !await ensureGuestCheckoutSession(this.context)) {
                   return;
                 }
                 context.push('/user/ride-request');

@@ -68,18 +68,11 @@ class _ProductBuyButtonState extends ConsumerState<ProductBuyButton> {
       context.push('/user/provider/${widget.providerId}');
       return;
     }
-    // GUEST INTERCEPTION — the transaction moment, and the only place a guest
-    // is stopped. It has to happen BEFORE addToCart: that insert is refused by
-    // RLS for an anonymous caller, so a guest who got past this point would
-    // see "you do not have permission" instead of the registration form.
-    // Nothing earlier in the app is gated, so browsing stays complete.
-    if (ref.read(guestModeProvider)) {
-      await requestAccountToContinue(
-        context,
-        action: widget.label.toLowerCase() == 'book'
-            ? 'book this service'
-            : 'buy this listing',
-      );
+    // A guest gets a real (anonymous) session here — not a registration form.
+    // The cart line and the order are scoped to that identity, so this has to
+    // happen before addToCart; nothing earlier in the app needs it.
+    if (ref.read(guestModeProvider) &&
+        !await ensureGuestCheckoutSession(context)) {
       return;
     }
     setState(() => _busy = true);

@@ -32,6 +32,12 @@ class _AdminDashboardState extends ConsumerState<AdminDashboard> {
   /// not the first 300 rows the screen happens to have loaded.
   int _pendingAvailability = 0;
 
+  /// Delivery checkouts waiting for an approval decision. This is the queue
+  /// that blocks a buyer on their waiting screen, so its badge is counted by
+  /// the server (`admin_checkout_request_count`) and is the first door the
+  /// "Pending" stat opens.
+  int _pendingCheckout = 0;
+
   /// Identity documents waiting on a reviewer. Shown on the Document
   /// Verification card, and folded into the header badge so a queue nobody
   /// opens is still visible.
@@ -47,6 +53,13 @@ class _AdminDashboardState extends ConsumerState<AdminDashboard> {
   void initState() {
     super.initState();
     _load();
+    // Approval-timeout reminders. The RPC is admin-only and deduplicates per
+    // order per hour, so opening the dashboard once cannot spam the team; a
+    // request nobody decided for ten minutes surfaces in their inbox without
+    // anyone having to open the Checkout Requests queue first.
+    Supabase.instance.client
+        .rpc('notify_stale_checkout_requests')
+        .then((_) {}, onError: (_) {});
   }
 
   Future<void> _load() async {
@@ -121,6 +134,10 @@ class _AdminDashboardState extends ConsumerState<AdminDashboard> {
       // "Pre-order stock checks" with no number at all, so the one queue with
       // a 15-minute clock on it was also the one nothing pointed at.
       count(() async => await client.rpc('pending_availability_request_count')),
+      // Checkout requests waiting for a decision. One unapproved request means
+      // a buyer is sitting on a waiting screen, which is more urgent than any
+      // other queue on this page.
+      count(() async => await client.rpc('admin_checkout_request_count')),
     ]);
 
     // Section visibility for the signed-in principal (fail-open to '*' is
@@ -180,6 +197,7 @@ class _AdminDashboardState extends ConsumerState<AdminDashboard> {
         _pendingOrderPayments = results[9];
         _pendingDocuments = results[10];
         _pendingAvailability = results[11];
+        _pendingCheckout = results[12];
         _totalIncome = income;
         _loading = false;
       });
@@ -225,6 +243,7 @@ class _AdminDashboardState extends ConsumerState<AdminDashboard> {
     if (_pendingDocuments > 0) return '/admin/document-verification';
     if (_openAppeals > 0) return '/admin/appeals';
     if (_openDisputes > 0) return '/admin/disputes';
+    if (_pendingCheckout > 0) return '/admin/checkout-requests';
     if (_pendingOrderPayments > 0) return '/admin/payments';
     if (_pendingRecharges > 0) return '/admin/payments';
     // Last before the catch-all: an unanswered stock check expires in minutes,
@@ -244,7 +263,8 @@ class _AdminDashboardState extends ConsumerState<AdminDashboard> {
     // work waiting". That is the "it is not showing at the top" half of the
     // report, and it is why the badge could read 0 while the Appeals card two
     // inches below it read "3 open cases".
-    final pendingTotal = _pendingProviders +
+    final pendingTotal = _pendingCheckout +
+        _pendingProviders +
         _pendingUsers +
         _pendingRecharges +
         _pendingDocuments +
@@ -543,6 +563,12 @@ class _AdminDashboardState extends ConsumerState<AdminDashboard> {
                             if (_pendingUsers > 0)
                               _pendingCard(Icons.person_add, 'User Approvals',
                                   '$_pendingUsers pending', AppTheme.teal, () => context.push('/admin/users')),
+                            if (_pendingCheckout > 0)
+                              _pendingCard(Icons.fact_check_outlined,
+                                  'Checkout Requests',
+                                  '$_pendingCheckout waiting for a decision',
+                                  AppTheme.warning,
+                                  () => context.push('/admin/checkout-requests')),
                             if (_pendingRecharges > 0)
                               _pendingCard(Icons.payment, 'Recharge Requests',
                                   '$_pendingRecharges pending', AppTheme.info, () => context.push('/admin/payments')),
@@ -624,6 +650,17 @@ class _AdminDashboardState extends ConsumerState<AdminDashboard> {
                                     ? '$_pendingDocuments waiting to review'
                                     : 'No documents waiting',
                                 () => context.push('/admin/document-verification')),
+                          // The checkout-approval queue: a buyer on the waiting
+                          // screen is blocked until one of these is decided.
+                          // Admin-only, not merely payment-permission: the RPC
+                          // re-checks is_admin() and a staff door that opens
+                          // onto a refusal is worse than no door.
+                          if (ref.read(authProvider).isAdmin)
+                            _menuCard(Icons.fact_check_outlined, 'Checkout Requests',
+                                _pendingCheckout > 0
+                                    ? '$_pendingCheckout waiting for a decision'
+                                    : 'Approve, assign or reject deliveries',
+                                () => context.push('/admin/checkout-requests')),
                           if (_can('payment_verification'))
                             _menuCard(Icons.payment, 'Payment Verification', null, () => context.push('/admin/payments')),
                           if (_can('payment_verification'))

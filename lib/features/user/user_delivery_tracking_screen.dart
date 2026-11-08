@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../core/services/active_order_store.dart';
 import '../../core/services/delivery_service.dart';
 import '../../core/services/location_service.dart';
 import '../../core/services/resilient_subscription.dart';
@@ -35,12 +36,31 @@ class DeliveryTrackingScreen extends ConsumerStatefulWidget {
 }
 
 class _DeliveryTrackingScreenState
-    extends ConsumerState<DeliveryTrackingScreen> {
+    extends ConsumerState<DeliveryTrackingScreen> with WidgetsBindingObserver {
   Map<String, dynamic>? _data;
   String? _error;
 
   LatLng? _driverPosition;
+
+  /// Bearing between the last two REAL fixes, so the pin points the way the
+  /// driver is actually travelling. Null until there are two fixes; the
+  /// simulated marker uses its own north/south bearing instead.
+  double? _driverHeading;
   Map<String, String>? _sellerContact;
+
+  /// Progress, computed from whichever position is trusted: the driver's real
+  /// GPS, or (when no fix has ever arrived) the clearly-labelled simulated
+  /// marker below.
+  double? _distanceKm;
+  int? _etaMinutes;
+
+  /// True while the marker is moving on a SIMULATED path, because the
+  /// assigned driver has not shared a GPS fix. It is shown to the buyer as
+  /// "approximate" rather than passed off as a live location, and it stops the
+  /// moment a real fix arrives.
+  bool _simulated = false;
+  LatLng? _simPosition;
+  Timer? _simTimer;
 
   bool _confirming = false;
   bool _contactLoading = false;
@@ -52,6 +72,7 @@ class _DeliveryTrackingScreenState
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _load();
     // State, not GPS: the delivery can flip to ARRIVED while the driver stands
     // still, and only the server knows when that happened.
@@ -60,9 +81,21 @@ class _DeliveryTrackingScreenState
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _poll?.cancel();
     _driverStream?.cancel();
+    _simTimer?.cancel();
     super.dispose();
+  }
+
+  /// A phone that was in a pocket for ten minutes has a stale map. Re-read the
+  /// delivery and, if there is still no GPS fix, put the simulated marker back
+  /// on its path (the timer does not run while the app is suspended).
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _load(silent: true);
+    }
   }
 
   Future<void> _load({bool silent = false}) async {
@@ -79,7 +112,17 @@ class _DeliveryTrackingScreenState
         _data = data;
         _error = null;
       });
+      // The order reached a terminal state: stop remembering it on this device,
+      // so the next launch opens the dashboard instead of a finished delivery.
+      final orderStatus = data['order_status'] as String?;
+      if (orderStatus == 'COMPLETED' ||
+          orderStatus == 'CANCELLED' ||
+          orderStatus == 'REJECTED') {
+        await ActiveOrderStore.clear();
+      }
       _watchDriver(data['driver_provider_id'] as String?);
+      _maybeStartSimulation(data);
+      _recomputeProgress();
       // The seller's number rides along: the buyer may need to reach the shop
       // while the parcel is moving, through the SAME escrow RPC the order
       // screen uses (release_order_contact, APPROVED onwards).
@@ -107,10 +150,85 @@ class _DeliveryTrackingScreenState
         if (loc == null) return;
         final point = GeoPoint.parse(loc);
         if (point == null) return;
-        setState(() => _driverPosition = LatLng(point.lat, point.lng));
+        final next = LatLng(point.lat, point.lng);
+        final previous = _driverPosition;
+        final heading = previous == null || previous == next
+            ? _driverHeading
+            : const Distance().bearing(previous, next);
+        setState(() {
+          _driverPosition = next;
+          _driverHeading = heading;
+          // A real fix wins over the simulated path, immediately.
+          _simulated = false;
+          _simTimer?.cancel();
+          _simTimer = null;
+        });
+        _recomputeProgress();
       },
       onState: (_) {},
     );
+  }
+
+  /// No GPS from the driver (radio off, app backgrounded, a provider that has
+  /// never published a fix). The buyer still deserves to see progress, so the
+  /// marker walks a straight line toward the delivery point at ~27 km/h and
+  /// the UI says it is approximate. This is code-marked simulation, not a
+  /// claim of live tracking.
+  void _maybeStartSimulation(Map<String, dynamic> data) {
+    final destLat = (data['dest_lat'] as num?)?.toDouble();
+    final destLng = (data['dest_lng'] as num?)?.toDouble();
+    if (destLat == null || destLng == null) return;
+    if (data['driver_provider_id'] == null) return;
+    if (_driverPosition != null) return;
+    if (_deliveryStatus == 'DELIVERED' || data['order_status'] == 'CANCELLED') {
+      _simTimer?.cancel();
+      return;
+    }
+    if (_simTimer != null) return;
+
+    final dest = LatLng(destLat, destLng);
+    // A deterministic start, ~1.3 km north of the drop-off, so the same order
+    // looks the same after a restart rather than jumping around.
+    _simPosition ??= LatLng(dest.latitude + 0.012, dest.longitude);
+    _simulated = true;
+    _simTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      if (!mounted) return;
+      final current = _simPosition ?? dest;
+      final metres =
+          const Distance().as(LengthUnit.Meter, current, dest).toDouble();
+      if (metres < 40) {
+        _simTimer?.cancel();
+        _simTimer = null;
+        _recomputeProgress();
+        return;
+      }
+      // ~15 m every two seconds.
+      final fraction = (15.0 / metres).clamp(0.0, 1.0);
+      setState(() {
+        _simPosition = LatLng(
+          current.latitude + (dest.latitude - current.latitude) * fraction,
+          current.longitude + (dest.longitude - current.longitude) * fraction,
+        );
+      });
+      _recomputeProgress();
+    });
+  }
+
+  /// Distance and minutes left, from the trusted position. 22 km/h is a
+  /// conservative city average; the number is labelled "about" on screen.
+  void _recomputeProgress() {
+    final destLat = (_data?['dest_lat'] as num?)?.toDouble();
+    final destLng = (_data?['dest_lng'] as num?)?.toDouble();
+    final pos = _driverPosition ?? _simPosition;
+    if (pos == null || destLat == null || destLng == null) return;
+    final km = const Distance()
+        .as(LengthUnit.Kilometer, pos, LatLng(destLat, destLng))
+        .toDouble();
+    if (!mounted) return;
+    setState(() {
+      _distanceKm = km;
+      _etaMinutes = km <= 0.05 ? 0 : ((km / 22.0) * 60).ceil();
+    });
   }
 
   Future<void> _loadSellerContact() async {
@@ -216,7 +334,11 @@ class _DeliveryTrackingScreenState
     final destLat = (_data!['dest_lat'] as num?)?.toDouble();
     final destLng = (_data!['dest_lng'] as num?)?.toDouble();
     final destLabel = (_data!['dest_label'] as String?) ?? '';
-    final driverPos = _driverPosition;
+    // The real fix when there is one; the simulated path only while the
+    // driver has never published one. The map and the ETA both read this, so
+    // they can never disagree about where the vehicle is.
+    final driverPos = _driverPosition ?? _simPosition;
+    final cancelled = (_data!['order_status'] as String?) == 'CANCELLED';
 
     return Scaffold(
       appBar: AppBar(title: const Text('Delivery')),
@@ -228,7 +350,10 @@ class _DeliveryTrackingScreenState
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _statusCard(driverName),
+              _statusCard(driverName, cancelled: cancelled),
+              const SizedBox(height: 12),
+              if (_distanceKm != null && !cancelled)
+                _progressCard(),
               const SizedBox(height: 16),
               ClipRRect(
                 borderRadius: BorderRadius.circular(12),
@@ -265,8 +390,22 @@ class _DeliveryTrackingScreenState
                                     secondsSinceFix: 0,
                                     categorySlug: 'delivery',
                                     categoryName: 'Delivery',
+                                    // A real marker points along its last two
+                                    // fixes; the simulated one can only move
+                                    // north/south along the drawn line, so that
+                                    // is the only honest bearing for it.
+                                    headingDegrees: !_simulated
+                                        ? _driverHeading
+                                        : (destLat == null
+                                            ? null
+                                            : (driverPos.latitude <= destLat
+                                                ? 0
+                                                : 180)),
                                   )
                                 ],
+                          routePoints: driverPos != null && destLat != null
+                              ? [driverPos, LatLng(destLat, destLng ?? 0)]
+                              : const [],
                           destinationPoint: destLat == null
                               ? null
                               : LatLng(destLat, destLng ?? 0),
@@ -309,11 +448,75 @@ class _DeliveryTrackingScreenState
     );
   }
 
-  Widget _statusCard(String driverName) {
+  /// "About 8 min · 3.1 km left". The wording is deliberately approximate:
+  /// the line is a straight line and the speed is a city average, not a routed
+  /// turn-by-turn ETA.
+  Widget _progressCard() {
+    final minutes = _etaMinutes ?? 0;
+    final km = _distanceKm ?? 0;
+    final arriving = minutes <= 1 || km <= 0.25;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: AppTheme.primaryGreen.withOpacity(0.06),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.route_outlined,
+              size: 16, color: AppTheme.primaryGreen),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              arriving
+                  ? 'Arriving now · ${km.toStringAsFixed(2)} km left'
+                  : 'About $minutes min · ${km.toStringAsFixed(2)} km left',
+              style: const TextStyle(
+                  fontSize: 12.5, fontWeight: FontWeight.w600),
+            ),
+          ),
+          if (_simulated)
+            const Text(
+              'APPROXIMATE',
+              style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                  color: AppTheme.gold),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _statusCard(String driverName, {bool cancelled = false}) {
     final String headline;
     final String detail;
     final IconData icon;
     final Color color;
+    if (cancelled) {
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: AppTheme.error.withOpacity(0.07),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: AppTheme.error.withOpacity(0.35)),
+        ),
+        child: const Row(
+          children: [
+            Icon(Icons.cancel_outlined, size: 18, color: AppTheme.error),
+            SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'This delivery was cancelled. Nothing is moving.',
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
     switch (_deliveryStatus) {
       case 'ARRIVED':
         headline = 'Your driver is there';

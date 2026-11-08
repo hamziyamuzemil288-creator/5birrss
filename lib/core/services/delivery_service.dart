@@ -93,6 +93,15 @@ class DeliveryService {
     return List<Map<String, dynamic>>.from(data as List);
   }
 
+  /// Admin: the approved vehicles in one driver's fleet, for checkout
+  /// approval. The server returns only that driver's own approved vehicles.
+  Future<List<Map<String, dynamic>>> adminDeliveryVehicles(
+      String driverProviderId) async {
+    final data = await _client.rpc('admin_delivery_vehicles',
+        params: {'p_driver_provider_id': driverProviderId});
+    return List<Map<String, dynamic>>.from(data as List);
+  }
+
   /// Admin: attach a driver to a delivery order.
   Future<void> assignDriver(
       String orderId, String driverProviderId) async {

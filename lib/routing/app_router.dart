@@ -31,6 +31,8 @@ import '../features/user/user_availability_screen.dart';
 import '../features/user/user_order_detail_screen.dart';
 import '../features/user/user_delivery_tracking_screen.dart';
 import '../features/user/provider_order_waiting_screen.dart';
+import '../features/user/checkout_waiting_screen.dart';
+import '../features/admin/admin_checkout_requests_screen.dart';
 import '../features/user/user_search_screen.dart';
 import '../features/user/live_map_screen.dart';
 import '../features/user/review_form_screen.dart';
@@ -125,16 +127,31 @@ import '../features/help_chat/help_chat_screen.dart';
 class _AuthRefreshNotifier extends ChangeNotifier {
   _AuthRefreshNotifier(this._ref) {
     _sub = _ref.listen<AuthState>(authProvider, (_, next) {
-      if (next.isAuthenticated) {
-        // Real session: guest browsing is over. Safe here (outside the
-        // redirect callback) — ending it inside redirect() would mutate a
-        // provider while go_router is deciding where to go.
+      if (next.isAuthenticated && !next.isGuest) {
+        // A REAL account: guest browsing is over. An anonymous session is
+        // still a guest — it is the identity checkout uses, not a sign-in —
+        // so the dashboard must keep its guest tabs and the router its sign-in
+        // doors. Safe here (outside the redirect callback) — mutating a
+        // provider inside redirect() would confuse go_router.
         _ref.read(guestModeProvider.notifier).end();
+      } else if (!next.isAuthenticated) {
+        // Signed out (or a session that could not be restored). There is no
+        // account behind the dashboard any more, so it must return to its
+        // public shape instead of keeping signed-in tabs that RLS now refuses.
+        _ref.read(guestModeProvider.notifier).start();
       }
       notifyListeners();
     });
     _guestSub =
         _ref.listen<bool>(guestModeProvider, (_, __) => notifyListeners());
+    // `listen` only fires on CHANGE. If auth had already restored a real
+    // session before this notifier was created (the warmed-up path), the
+    // dashboard would otherwise start in its public shape for an account that
+    // is signed in. Reconcile once at construction.
+    final current = _ref.read(authProvider);
+    if (current.isAuthenticated && !current.isGuest) {
+      _ref.read(guestModeProvider.notifier).end();
+    }
   }
 
   final Ref _ref;
@@ -187,7 +204,6 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       // The third session state (guest_session.dart). Read, never watched:
       // this callback is the reader, and _AuthRefreshNotifier above is what
       // makes go_router re-evaluate when the flag moves.
-      final isGuest = ref.read(guestModeProvider);
       final loc = state.matchedLocation;
       final isAuthRoute = loc == '/login' ||
           loc == '/role-select' ||
@@ -208,29 +224,18 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       if (isLoading) return null;
 
       // ── No session ──
-      // Two different visitors arrive here, and they must not be treated
-      // alike any more:
-      //
-      //   * a GUEST ("Continue as Guest" on the welcome screen) browses the
-      //     marketplace. The account and workspace routes are closed, and the
-      //     transaction routes open the standard user registration at the
-      //     exact moment they are attempted — Buy, Book, CHECKOUT, a ride
-      //     request. Nothing is gated earlier than that.
-      //   * everybody else is sent to sign in, exactly as before.
+      // The first screen is the DASHBOARD for everybody. There is no welcome
+      // wall and no login wall: a visitor browses the marketplace, and the one
+      // identity a purchase needs is opened lazily as an anonymous session at
+      // the buy/checkout moment (guest_session.dart). Workspaces still ask who
+      // you are — a provider, driver or administrator must sign in on purpose.
       if (!isAuthenticated) {
-        if (isGuest) {
-          // The splash screen is a spinner that only exists so the router can
-          // decide; a guest has already decided, so it goes straight in.
-          if (loc == '/') return '/user';
-          if (guestBlockedTransaction(loc)) return '/signup/user';
-          if (guestBlockedAccount(loc)) return '/login';
-          if (isApprovalRoute) return '/user';
-          // Browsing routes, the marketplace detail pages, search, the map,
-          // the legal pages, and the sign-in/sign-up screens are open.
-          return null;
-        }
         if (isAuthRoute || isSignupRoute) return null;
-        return '/login';
+        // The splash is a spinner that exists only so this callback can decide.
+        if (loc == '/') return '/user';
+        if (guestBlockedAccount(loc)) return '/login';
+        if (isApprovalRoute) return '/user';
+        return null;
       }
 
       // Authenticated but profile or roles haven't loaded yet — stay put
@@ -275,7 +280,11 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       // re-gating it locks a working customer out of the app over a field
       // they could not have known was added. It can still be corrected,
       // voluntarily, from Edit Profile.
-      final needsProfileCompletion = !authState.isAdmin &&
+      // A guest buyer is exempt as well: an anonymous session has no phone,
+      // kebele or street by design, and sending it to /complete-profile would
+      // be registering a buyer in all but name.
+      final needsProfileCompletion = !authState.isGuest &&
+          !authState.isAdmin &&
           !authState.isStaffMember &&
           !authState.isApproved &&
           !authState.profile!.isVerifiable;
@@ -340,13 +349,20 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         return _getDashboardPath(authState);
       }
 
-      // ── On an auth route (login, signup, role-select) — redirect away ──
-      // The guest flag is already cleared by _AuthRefreshNotifier on the same
-      // auth change that got us here, so a guest who signs in is forwarded to
-      // their real dashboard with no trace of guest mode.
+      // ── On an auth route (login, signup, role-select) ──
+      // A GUEST session must still be able to reach these screens: the whole
+      // point of the anonymous identity is that it is invisible, and a buyer
+      // who already has an account needs a door to sign into it. Everyone else
+      // is forwarded to their dashboard exactly as before.
       if (isAuthRoute || isSignupRoute) {
+        if (authState.isGuest) return null;
         return _getDashboardPath(authState);
       }
+
+      // A guest session is a buyer and nothing else. The workspace doors stay
+      // closed until a real sign-in — the server refuses them anyway, but a
+      // screen that renders "not a provider" is worse than the sign-in door.
+      if (authState.isGuest && guestBlockedAccount(loc)) return '/login';
 
       // ── On the splash screen — redirect to the correct dashboard ──
       if (loc == '/') {
@@ -376,12 +392,16 @@ final appRouterProvider = Provider<GoRouter>((ref) {
           // the pair straight into /provider/documents afterwards. Ordinary
           // self-service signups never carry the parameter.
           final assisted = state.uri.queryParameters['assisted'] == '1';
+          // A buyer does not register any more. The old /signup/user link is
+          // answered with the sign-in screen instead — an existing buyer may
+          // still have an account, and a new one simply checks out as a guest.
+          if (r != 'vehicle' && r != 'service') {
+            return const LoginScreen();
+          }
           return SignupScreen(
             role: switch (r) {
-              'user' => SignupRole.user,
               'vehicle' => SignupRole.vehicleProvider,
-              'service' => SignupRole.serviceProvider,
-              _ => SignupRole.user,
+              _ => SignupRole.serviceProvider,
             },
             assistedByStaff: assisted,
           );
@@ -511,6 +531,13 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             providerNotActivated: (args['providerNotActivated'] as bool?) ?? false,
           );
         },
+      ),
+      // The admin checkout-approval gate's buyer side. Declared BEFORE
+      // /user/orders/:id so the more specific path wins in go_router.
+      GoRoute(
+        path: '/user/checkout/waiting/:id',
+        builder: (_, s) =>
+            CheckoutWaitingScreen(orderId: s.pathParameters['id']!),
       ),
       GoRoute(path: '/user/orders/:id', builder: (_, s) => UserOrderDetailScreen(orderId: s.pathParameters['id']!, viewerRole: s.extra as String? ?? 'user')),
       // The buyer's delivery, live. Reached from the order's own screen; the
@@ -688,6 +715,11 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       // quick-stat tile opens. There was no admin order list at all before
       // this: the tile counted orders and went nowhere.
       GoRoute(path: '/admin/orders', builder: (_, __) => const AdminOrdersScreen()),
+      // The checkout-approval queue: requests waiting for a decision, and the
+      // only screen that attaches a vehicle + driver to one.
+      GoRoute(
+          path: '/admin/checkout-requests',
+          builder: (_, __) => const AdminCheckoutRequestsScreen()),
       // The buyer/provider availability queue — who asked, who answered,
       // how long it took. The pre-order gate's rows, visible to the person
       // who has to arbitrate a dispute about them.

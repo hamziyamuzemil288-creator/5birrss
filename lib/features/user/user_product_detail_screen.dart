@@ -138,13 +138,8 @@ class _State extends ConsumerState<UserProductDetailScreen> {
             icon: Icon(_fav ? Icons.favorite : Icons.favorite_border,
                 color: _fav ? AppTheme.error : null),
             onPressed: () async {
-              // GUEST INTERCEPTION — same rule as Buy. A guest has no
-              // favourites to write to (the insert is refused without a
-              // user_id), so the tap opens the registration dialog instead
-              // of failing silently behind a dead heart.
-              if (ref.read(guestModeProvider)) {
-                await requestAccountToContinue(context,
-                    action: 'save favourites to your account');
+              if (ref.read(guestModeProvider) &&
+                  !await ensureGuestCheckoutSession(context)) {
                 return;
               }
               final now = await FavoritesService.instance
@@ -447,15 +442,10 @@ class _State extends ConsumerState<UserProductDetailScreen> {
       v == v.roundToDouble() ? v.toStringAsFixed(0) : v.toStringAsFixed(2);
 
   Future<void> _addToCart() async {
-    // GUEST INTERCEPTION — ADD TO CART is a transaction entry point, the
-    // third way into the same flow BUY starts, and it was missed by the
-    // original gate: the insert was refused by RLS and the guest got an
-    // error snackbar where the registration form is the useful answer.
-    if (ref.read(guestModeProvider)) {
-      await requestAccountToContinue(context,
-          action: (_product?['listing_type'] as String?) == 'SERVICE'
-              ? 'book this service'
-              : 'buy this listing');
+    // The cart write is scoped to an identity, so a guest opens the anonymous
+    // session before it rather than being sent to a registration form.
+    if (ref.read(guestModeProvider) &&
+        !await ensureGuestCheckoutSession(context)) {
       return;
     }
     final isUnitPriced =
@@ -526,18 +516,8 @@ class _State extends ConsumerState<UserProductDetailScreen> {
   /// Direct-buy: put the chosen amount in the cart, then jump straight to
   /// checkout for this provider.
   Future<void> _buyNow() async {
-    // GUEST INTERCEPTION — this page's BUY/BOOK is the second way into the
-    // same transaction the listing tiles start, so it carries the same rule,
-    // and before the cart write rather than after it: an anonymous cart
-    // insert is refused by RLS (the error a guest used to see), while the
-    // registration form is the thing they can actually act on.
-    if (ref.read(guestModeProvider)) {
-      await requestAccountToContinue(
-        context,
-        action: (_product?['listing_type'] as String?) == 'SERVICE'
-            ? 'book this service'
-            : 'buy this listing',
-      );
+    if (ref.read(guestModeProvider) &&
+        !await ensureGuestCheckoutSession(context)) {
       return;
     }
     final isUnitPriced =
