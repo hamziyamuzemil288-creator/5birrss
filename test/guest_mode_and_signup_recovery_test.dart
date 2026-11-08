@@ -129,7 +129,10 @@ void main() {
     test('the buy button opens the session before writing the cart line', () {
       final src = read('lib/core/widgets/product_buy_button.dart');
       final ensure = src.indexOf('ensureGuestCheckoutSession');
-      final add = src.indexOf('addToCart');
+      // The CODE call, not the explanatory comment above it: the comment
+      // mentions addToCart before the session line, which made a plain
+      // indexOf compare the two in the wrong order.
+      final add = src.indexOf('CartService.instance.addToCart');
       expect(ensure, greaterThanOrEqualTo(0));
       expect(add, greaterThan(ensure),
           reason: 'the cart row is scoped to auth.uid(), so the anonymous '
