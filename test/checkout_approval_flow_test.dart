@@ -176,6 +176,11 @@ void main() {
     test('buyer, driver and provider are notified once each', () {
       expect(flowSql, contains("'checkout-approved:' || p_order_id::text"));
       expect(flowSql, contains("'checkout-assigned:' || p_order_id::text"));
+      // The driver is told where to collect the parcel as well as where to
+      // take it, and the amount, not only that a job exists.
+      expect(flowSql, contains("Pickup: "));
+      expect(flowSql, contains("Drop-off: "));
+      expect(flowSql, contains(". Amount: "));
       expect(flowSql, contains("':provider'"));
       expect(flowSql, contains('notify_user_safe'));
       // The idem keys are what makes a retry silent.

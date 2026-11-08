@@ -717,6 +717,7 @@ DECLARE
   v_provider_user uuid;
   v_driver_user uuid;
   v_ref text;
+  v_pickup text;
   v_busy int;
   v_has_proof boolean;
 BEGIN
@@ -923,6 +924,18 @@ BEGIN
     jsonb_build_object('order_id', p_order_id, 'event', 'checkout_approved')
   );
 
+  -- The driver needs BOTH ends of the trip in the notification, not just the
+  -- drop-off: the pickup is the seller's registered address, which is where
+  -- they have to go first. Fall back to the business name, then to a neutral
+  -- sentence, because an approved provider can predate address_text.
+  SELECT coalesce(
+           nullif(btrim(pp.address_text), ''),
+           nullif(btrim(pp.business_name), '')
+         )
+    INTO v_pickup
+    FROM public.provider_profiles pp
+   WHERE pp.id = v_order.provider_id;
+
   SELECT pp.user_id INTO v_driver_user
     FROM public.provider_profiles pp WHERE pp.id = p_driver_provider_id;
   PERFORM public.notify_user_safe(
@@ -930,9 +943,13 @@ BEGIN
     v_driver_user,
     'ORDER_RECEIVED',
     'New delivery job',
-    'Order #' || v_ref || ' is assigned to you. Drop-off: '
+    'Order #' || v_ref || ' is assigned to you. Pickup: '
+    || coalesce(v_pickup, 'the provider')
+    || '. Drop-off: '
     || coalesce(nullif(btrim(v_order.delivery_address), ''), 'open the job for the address')
-    || '.',
+    || '. Amount: '
+    || to_char(v_order.total_amount, 'FM999999990.00') || ' '
+    || coalesce(v_order.currency, 'ETB') || '.',
     jsonb_build_object('order_id', p_order_id, 'event', 'delivery_assigned')
   );
 
