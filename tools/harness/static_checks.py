@@ -2249,9 +2249,11 @@ def check_payment_screenshots_are_downscaled() -> list[str]:
         ("recharge_screen.dart (payment-screenshots, 5MB)",
          LIB / "features" / "wallet" / "recharge_screen.dart",
          ["_pickScreenshot"], "single"),
+        # Buyers no longer upload an identity document (20261108000002): the
+        # only image this screen picks is the payment proof.
         ("user_payment_screen.dart (payment-proofs)",
          LIB / "features" / "user" / "user_payment_screen.dart",
-         ["_pickScreenshot", "_pickNationalId"], "single"),
+         ["_pickScreenshot"], "single"),
         ("user_order_detail_screen.dart (payment-proofs)",
          LIB / "features" / "user" / "user_order_detail_screen.dart",
          ["_submitPayment"], "single"),
@@ -9883,11 +9885,13 @@ def check_payment_step_and_appeal_are_wired() -> list[str]:
                 "lib/features/user/user_checkout_screen.dart: the availability "
                 "gate's backstop is gone (no %r)" % needle)
 
+    # No `user_documents` needle any more: a buyer is a guest and uploads no
+    # identity document (20261108000002). The proof upload is the only one.
     payment = dart(
         "features/user/user_payment_screen.dart",
         "AdminPaymentDetailsCard", "_pickScreenshot", "order-create",
         "payment_proofs", "'/appeal?about=dispute'", "OrderDraft",
-        "paymentDeferred", "AvailabilityNotice", "user_documents",
+        "paymentDeferred", "AvailabilityNotice",
         why="the payment step lost the platform's account, the proof upload, "
             "the order call, the appeal door, or the deferred-payment path")
 

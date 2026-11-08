@@ -4,6 +4,72 @@ All notable changes to Aliob (All In One Business). The version name and
 versionCode here match `pubspec.yaml`'s `version:` line and
 `lib/core/app_build.dart` (pinned by `test/forced_update_gate_test.dart`).
 
+## 1.9.6+135 - 2026-11-08
+
+### The marketplace opens first
+
+- The app opens on the dashboard for everyone. There is no login or register
+  wall in front of browsing; providers, drivers and administrators sign in on
+  purpose from the dashboard or "Become a provider".
+- Returning signed-in users still land on their own dashboard.
+
+### Guest checkout, no buyer registration
+
+- Buyers no longer register and no longer verify documents. At the first
+  transactional tap the app opens a real Supabase **anonymous** session, so the
+  order, push notifications and Realtime still have an `auth.uid()` to scope to.
+  RLS is unchanged: a guest can only ever read their own order.
+- Checkout asks only for the delivery: name, phone, address, map point and an
+  optional note. The buyer's National ID upload is gone from the payment step.
+- The active order id is stored on the device, so reopening the app returns a
+  guest to their waiting screen or the live map, not to an empty dashboard.
+- `supabase/migrations/20261108000002_...sql` re-emits `handle_new_user()` with
+  an anonymous branch and makes business tables read-only for a guest JWT.
+
+### Checkout approval by an administrator
+
+- A delivery checkout is saved as **AWAITING_APPROVAL** and the buyer gets a
+  live waiting screen with a cancel action. The admin queue is
+  **Admin → Checkout Requests** with Pending / Approved / Rejected / All tabs,
+  search, a detail sheet and a pending badge on the dashboard.
+- Approving requires a payment proof and assigns a specific approved vehicle
+  and driver from the existing fleet. The RPC row-locks the order, refuses a
+  second decision, refuses a busy vehicle or driver, verifies the proof, and
+  writes `audit_logs`, order history and notifications for buyer, driver and
+  provider. Rejecting requires a reason the buyer sees.
+- Approval moves the buyer's screen to the live map through Realtime on
+  `orders` (published with `REPLICA IDENTITY FULL`), with a 10-second read as
+  the reconnect fallback rather than the primary path.
+- Reminders for requests waiting more than ten minutes are deduplicated per
+  order per hour and fire when an admin opens the dashboard or the queue.
+
+### Delivery-only checkout, bookings preserved
+
+- The "I go to them" pickup choice is gone from checkout, its price branch and
+  its strings. New purchases are delivered.
+- A basket made entirely of bookings (services/rooms) still orders the way a
+  service always has — at the provider — without a pickup card, so booking a
+  haircut does not ask for a shipping address. Old pickup orders still render.
+
+### Live tracking
+
+- The delivery map draws the route, the animated vehicle, the distance left and
+  an approximate ETA. It uses the driver's real `driver_status` fixes when they
+  exist; when none has ever arrived it falls back to a clearly marked simulated
+  approach that stops the moment a real fix lands.
+- The screen handles resume after backgrounding, cancellation, arrival and the
+  delivered state.
+
+### Deployment
+
+- Apply `20261108000001_checkout_approval_status.sql` first, then
+  `20261108000002_guest_checkout_and_checkout_approval.sql`. Then deploy the
+  `order-create`, `checkout-review` and `checkout-cancel` Edge Functions.
+  Enable **Anonymous sign-ins** in Supabase Auth (or `supabase config push`).
+- `checkout-review` and `checkout-cancel` exist because an order status change
+  is a server write: the order-status guard correctly refuses an ADMIN JWT too,
+  so the screens call these endpoints instead of the RPCs directly.
+
 ## 1.9.5+134 - 2026-10-30
 
 ### Buying one product means buying one product
