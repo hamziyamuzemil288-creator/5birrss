@@ -35,6 +35,7 @@ class LiveMap extends StatefulWidget {
     this.handTypedLabel,
     this.pickupPoint,
     this.destinationPoint,
+    this.routePoints = const [],
     this.showRecenter = true,
     this.recenterLabel = 'My location',
     this.onRecenter,
@@ -76,6 +77,11 @@ class LiveMap extends StatefulWidget {
 
   final LatLng? pickupPoint;
   final LatLng? destinationPoint;
+
+  /// The line a tracked delivery (or ride) is following, drawn under the
+  /// markers. Empty means no line — callers that do not have one (the general
+  /// traffic map) simply draw nothing extra.
+  final List<LatLng> routePoints;
 
   final bool showRecenter;
   final String recenterLabel;
@@ -269,6 +275,16 @@ class _LiveMapState extends State<LiveMap> with SingleTickerProviderStateMixin {
             // Tile failures degrade to a placeholder instead of crashing the
             // screen — see ResilientTileLayer.
             const ResilientTileLayer(),
+            if (widget.routePoints.length >= 2)
+              PolylineLayer(
+                polylines: [
+                  Polyline(
+                    points: widget.routePoints,
+                    strokeWidth: 4,
+                    color: AppTheme.primaryGreen.withOpacity(0.65),
+                  ),
+                ],
+              ),
             MarkerLayer(markers: markers),
             // Required by the OpenStreetMap tile usage policy.
             const RichAttributionWidget(

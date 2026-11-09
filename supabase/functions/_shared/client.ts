@@ -83,6 +83,22 @@ export function sanitizeError(msg: string): string {
     // One-time activation / zero-balance wallet gates (see 0038) — buyers get
     // the specific reason so the app can route them to the waiting screen.
     "PROVIDER_NOT_ACTIVATED", "PROVIDER_WALLET_EMPTY", "REGISTRATION_FEE_REQUIRED",
+    // Admin checkout approval (20261108000002): these are the refusal codes the
+    // review sheet explains in place (busy vehicle/driver, already decided, a
+    // missing proof, a rejection without a reason). Everything else stays
+    // generic on purpose.
+    "ONLY_AN_ADMINISTRATOR_MAY_DECIDE_A_CHECKOUT_REQUEST",
+    "DECISION_MUST_BE_APPROVE_OR_REJECT",
+    "CHECKOUT_REQUEST_ALREADY_DECIDED",
+    "A_REJECTION_NEEDS_A_REASON",
+    "APPROVAL_REQUIRES_A_VEHICLE_AND_A_DRIVER",
+    "DRIVER_MUST_BE_AN_APPROVED_VEHICLE_PROVIDER",
+    "VEHICLE_NOT_FOUND", "VEHICLE_DOES_NOT_BELONG_TO_THAT_DRIVER",
+    "VEHICLE_IS_NOT_AVAILABLE", "VEHICLE_DOES_NOT_MATCH_THE_CHOSEN_TYPE",
+    "VEHICLE_ALREADY_BUSY", "DRIVER_ALREADY_BUSY",
+    // Guest checkout cancellation (20261108000002)
+    "ONLY_THE_BUYER_MAY_CANCEL_THIS_REQUEST",
+    "CHECKOUT_REQUEST_CAN_ONLY_BE_CANCELLED_WHILE_PENDING",
   ];
   for (const code of safeCodes) {
     if (msg.includes(code)) return msg;

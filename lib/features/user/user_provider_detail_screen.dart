@@ -483,9 +483,8 @@ class _State extends State<UserProviderDetailScreen> {
               icon: Icon(_fav ? Icons.favorite : Icons.favorite_border,
                   color: _fav ? AppTheme.error : null),
               onPressed: () async {
-                if (ref.read(guestModeProvider)) {
-                  await requestAccountToContinue(context,
-                      action: 'save favourites to your account');
+                if (ref.read(guestModeProvider) &&
+                    !await ensureGuestCheckoutSession(context)) {
                   return;
                 }
                 final now = await FavoritesService.instance

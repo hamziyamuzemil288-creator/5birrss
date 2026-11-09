@@ -41,25 +41,28 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
   String? _error;
   final _addressCtrl = TextEditingController();
 
-  // Phase 4: shared selection flow — Delivery or Self-pickup. Self-pickup
-  // pays the product price only (no delivery), delivery shows the address
-  // step. Both paths share the same payment step below.
-  //
-  // A BOOKING starts on the other option (see [_isBookingCart]): a service or
-  // a room is not delivered, and the delivery path demands a delivery address
-  // — server-side, `order-create` answers "Delivery requires an address" — so
-  // booking a haircut used to stop at a form asking where to ship it.
+  // The buyer, as a guest gives them. A guest has no profile worth reading at
+  // the door, so the three fields delivery actually needs are collected here
+  // and written onto the order by order-create. Nothing else is asked for:
+  // no registration, no document, no verification.
+  final _nameCtrl = TextEditingController();
+  final _phoneCtrl = TextEditingController();
+  final _notesCtrl = TextEditingController();
+
+  /// The buyer no longer CHOOSES a fulfillment mode. A purchase is delivered;
+  /// a BOOKING (a service, a room) happens at the provider, exactly as it did
+  /// before, so a haircut does not demand a shipping address. That second case
+  /// is decided by the basket itself, never by a pickup card — the old "I go
+  /// to them" option is gone from the screen and from the price.
   String _fulfillmentMode = 'DELIVERY';
 
-  /// True once the buyer has picked a fulfillment option themselves. The
-  /// booking default is applied only while this is false, so a buyer who chose
-  /// delivery for a booking keeps it when the cart re-reads.
+  /// True once the buyer has explicitly chosen how an order arrives. Nothing
+  /// in this build offers that choice, so the automatic booking default is
+  /// never at risk of overwriting a decision — the flag is kept so a future
+  /// mode picker cannot reintroduce the bug where a reload reset it.
   bool _fulfillmentTouched = false;
 
-  /// True when every line in this cart is booked rather than bought — the same
-  /// two listing types the shared BUY/BOOK rule names (`listingActionLabel` in
-  /// core/widgets/product_card.dart; `CartItem.isBooking` is that rule on the
-  /// cart's own line). An empty cart is not a booking.
+  /// Every line in the basket is an appointment rather than a parcel.
   bool get _isBookingCart =>
       _items.isNotEmpty && _items.every((i) => i.isBooking);
 
@@ -82,13 +85,12 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
   String? _deliveryPlaceLabel;
   DeliveryQuote? _deliveryQuote;
   bool _deliveryQuoting = false;
-  bool _deliveryFlowRunning = false;
 
   /// Set when the SERVER refused the delivery for being past
-  /// `max_delivery_distance_km`. Delivery is then not offered at all: the card
-  /// explains why and the basket stays on self-pickup, which is the other
-  /// option the server will still take. Never decided here — the refusal comes
-  /// back as `BEYOND_MAX_DISTANCE` from the same quote that prices the trip.
+  /// `max_delivery_distance_km`. Delivery is the only option, so the card
+  /// explains why and CONTINUE is blocked — there is no second mode to quietly
+  /// move the buyer to. Never decided here: the refusal comes back as
+  /// `BEYOND_MAX_DISTANCE` from the same quote that prices the trip.
   bool _deliveryBeyondMax = false;
 
   /// The server's own sentence for [_deliveryBeyondMax], shown verbatim so the
@@ -104,8 +106,7 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
           : 0.0;
 
   /// What the buyer pays: the product display prices plus the delivery fee
-  /// when there is one. Switching to Self-pickup drops the fee out of the
-  /// total immediately, because [_deliveryFee] reads [_fulfillmentMode].
+  /// when the server has priced one.
   double get _payableTotal => _total + _deliveryFee;
 
   /// True when at least one item in this cart is a listing whose provider
@@ -176,6 +177,9 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
   @override
   void dispose() {
     _addressCtrl.dispose();
+    _nameCtrl.dispose();
+    _phoneCtrl.dispose();
+    _notesCtrl.dispose();
     super.dispose();
   }
 
@@ -191,6 +195,17 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
       final items = wanted.isEmpty
           ? forProvider
           : forProvider.where((i) => wanted.contains(i.productId)).toList();
+      // A basket of bookings stays a booking. The server has no delivery to
+      // price and the buyer has nowhere to receive a haircut, so the order is
+      // created in the mode the service flow already uses; nothing on screen
+      // offers it as a choice.
+      if (!_fulfillmentTouched &&
+          items.isNotEmpty &&
+          items.every((i) => i.isBooking)) {
+        _fulfillmentMode = 'SELF_PICKUP';
+      } else if (!_fulfillmentTouched) {
+        _fulfillmentMode = 'DELIVERY';
+      }
       // Read the provider's name for the payment step's header.
       await _loadProviderName();
       // Item H: the platform commission this order will incur, through the SAME
@@ -221,9 +236,8 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
       // and city), never to the buyer, so showing it on the buyer's checkout
       // was a number the buyer never pays — the fee still lives in the
       // provider wallet screen and the admin income views, where it is real.
-      // The buyer's National ID is now read by the PAYMENT screen, which is
-      // where an upload is asked for: the checkout only decides how the order
-      // arrives, so it has no reason to query user_documents.
+      // No buyer document is read anywhere any more: a buyer is a guest and
+      // verifies nothing. The checkout only decides how the order arrives.
 
       // Does anything in this cart need the provider to confirm it is
       // available? One gated item gates the order: the buyer pays for the
@@ -294,16 +308,6 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
         setState(() {
           _items = items;
           _needsAvailabilityConfirmation = needsConfirmation;
-          // A basket of bookings does not need a delivery address, and asking
-          // for one is where a booking stopped looking like a booking. The
-          // buyer can still switch to delivery — that is the option a service
-          // performed at their address needs — and switching sets
-          // [_fulfillmentTouched] so this never overrides them.
-          if (!_fulfillmentTouched &&
-              items.isNotEmpty &&
-              items.every((i) => i.isBooking)) {
-            _fulfillmentMode = 'SELF_PICKUP';
-          }
           _loading = false;
         });
       }
@@ -447,10 +451,9 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
     );
     if (!mounted) return;
 
-    // Past the cap the server refuses instead of pricing. Delivery stops being
-    // an option on the spot — the basket falls back to self-pickup and the
-    // card says why — rather than leaving a delivery selected with no price
-    // the server will accept at submission.
+    // Past the cap the server refuses instead of pricing. Delivery is the only
+    // option now, so the refusal is shown in place and CONTINUE is blocked —
+    // there is no fallback mode to quietly move the buyer to.
     final beyondMax =
         !quote.ok && quote.reason == 'BEYOND_MAX_DISTANCE';
     setState(() {
@@ -458,28 +461,7 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
       _deliveryQuoting = false;
       _deliveryBeyondMax = beyondMax;
       _deliveryRefusal = beyondMax ? quote.message : null;
-      if (beyondMax && _fulfillmentMode == 'DELIVERY') {
-        _fulfillmentMode = 'SELF_PICKUP';
-        _fulfillmentTouched = true;
-      }
     });
-  }
-
-  /// "With Delivery" chosen: prompt the vehicle, then the point. Both are
-  /// re-runnable from the receipt block below, so changing your mind never
-  /// costs the buyer their place.
-  Future<void> _startDeliveryFlow() async {
-    if (_deliveryFlowRunning) return;
-    _deliveryFlowRunning = true;
-    try {
-      if (_deliveryVehicleId == null) await _chooseVehicleType();
-      if (!mounted) return;
-      if (_deliveryLat == null || _deliveryLng == null) {
-        await _chooseDeliveryPoint();
-      }
-    } finally {
-      _deliveryFlowRunning = false;
-    }
   }
 
   /// The delivery option's receipt: what was chosen, what the server priced,
@@ -589,17 +571,34 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
                   fontSize: 12.5, height: 1.35, color: AppTheme.textMuted),
             ),
           const SizedBox(height: 4),
-          TextButton(
-            onPressed: () => setState(() {
-              _fulfillmentTouched = true;
-              _fulfillmentMode = 'SELF_PICKUP';
-            }),
-            style: TextButton.styleFrom(
-              padding: EdgeInsets.zero,
-              visualDensity: VisualDensity.compact,
+        ],
+      ),
+    );
+  }
+
+  /// A booking happens at the provider. This is an explanation, never a
+  /// choice: there is no delivery fee and no vehicle for a service, and the
+  /// order keeps the mode the booking flow has always used.
+  Widget _bookingNote() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppTheme.teal.withOpacity(0.06),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppTheme.teal.withOpacity(0.3)),
+      ),
+      child: const Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.event_available_outlined, size: 18, color: AppTheme.teal),
+          SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'This is a booking — the provider serves you at their place, so '
+              'there is no delivery address, vehicle or delivery fee.',
+              style: TextStyle(fontSize: 12.5, height: 1.45),
             ),
-            child: const Text('Remove delivery — I will pick it up',
-                style: TextStyle(fontSize: 12.5)),
           ),
         ],
       ),
@@ -618,13 +617,38 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
       setState(() => _error = 'Your cart is empty for this provider');
       return;
     }
-    // A delivery order without an address is refused by the server
-    // ("Delivery requires an address"), so it is refused here first, next to
-    // the choice that needs it, where the buyer can fix it.
-    if (_fulfillmentMode == 'DELIVERY' &&
-        _addressCtrl.text.trim().isEmpty) {
+    // Delivery is the only way an order arrives, so the three things a
+    // delivery actually needs are required here, next to the fields that
+    // collect them. The server refuses the same three.
+    final name = _nameCtrl.text.trim();
+    final phone = _phoneCtrl.text.trim();
+    final address = _addressCtrl.text.trim();
+    if (name.isEmpty) {
+      setState(() => _error = 'Add the name of the person receiving the order.');
+      return;
+    }
+    if (RegExp(r'^[+0-9][0-9\s-]{6,19}$').hasMatch(phone) == false) {
       setState(() => _error =
-          'Add the delivery address, or choose self-pickup instead.');
+          'Add a valid phone number so the driver can reach you.');
+      return;
+    }
+    if (_fulfillmentMode == 'DELIVERY' && address.isEmpty) {
+      setState(() => _error = 'Add the delivery address.');
+      return;
+    }
+    // The pin is what the driver navigates to and what the buyer's tracking
+    // map draws a route to. An address line alone cannot be turned into a
+    // destination, so it is required, and it can be placed by hand on the map
+    // when GPS is unavailable. A booking has no delivery and needs neither.
+    if (_fulfillmentMode == 'DELIVERY' &&
+        (_deliveryLat == null || _deliveryLng == null)) {
+      setState(() => _error =
+          'Set the delivery point on the map so the driver can find you.');
+      return;
+    }
+    if (_fulfillmentMode == 'DELIVERY' && _deliveryBeyondMax) {
+      setState(() => _error = _deliveryRefusal ??
+          'Delivery is not available this far away.');
       return;
     }
     context.push(
@@ -634,7 +658,7 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
         providerName: _providerName,
         items: List<CartItem>.from(_items),
         fulfillmentMode: _fulfillmentMode,
-        deliveryAddress: _addressCtrl.text.trim(),
+        deliveryAddress: address,
         deliveryLat: _deliveryLat,
         deliveryLng: _deliveryLng,
         deliveryVehicleId: _deliveryVehicleId,
@@ -643,6 +667,9 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
         deliveryDistanceKm: _deliveryQuote?.distanceKm,
         paymentDeferred: _needsAvailabilityConfirmation,
         commissionPreview: _commissionPreview,
+        buyerName: name,
+        buyerPhone: phone,
+        buyerNote: _notesCtrl.text.trim(),
       ),
     );
   }
@@ -732,10 +759,8 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
                             // Part 10: when delivery has been priced, the
                             // breakdown is shown as its two parts — product
                             // price and delivery fee — and the total is their
-                            // sum. With self-pickup (or before a delivery has
-                            // been priced) there is one line, exactly as
-                            // before, so nothing about the ordinary checkout
-                            // changed shape.
+                            // sum. Before a delivery has been priced there is
+                            // one line, exactly as before.
                             if (_deliveryFee > 0) ...[
                               Row(
                                 mainAxisAlignment:
@@ -809,86 +834,70 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
                         ),
                       ),
                       const SizedBox(height: 20),
-                      // Phase 4: fulfillment selection (shared flow). The two
-                      // options are the same two the server knows (DELIVERY /
-                      // SELF_PICKUP); only the words change for a booking, so a
-                      // service says where it happens rather than where it is
-                      // shipped.
-                      Text(
-                          _isBookingCart
-                              ? 'How will this booking work?'
-                              : 'How do you want to get it?',
+                      // DELIVERY ONLY for a purchase. The old two-card choice
+                      // (delivery vs self-pickup) is gone, together with its
+                      // price branch, its note and its strings. A BOOKING is
+                      // the one exception, and it is not a choice: a service
+                      // happens at the provider, so the screen says so instead
+                      // of asking for a shipping address the service cannot
+                      // use. Old pickup orders keep rendering.
+                      Text(_isBookingCart ? 'Your details' : 'Delivery details',
                           style: const TextStyle(
                               fontSize: 15, fontWeight: FontWeight.w600)),
-                      const SizedBox(height: 8),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: _FulfillmentCard(
-                              icon: Icons.local_shipping_outlined,
-                              title: _isBookingCart
-                                  ? 'They come to me'
-                                  : 'Delivery',
-                              subtitle: _isBookingCart
-                                  ? 'At the address you give'
-                                  : 'Brought to your address',
-                              selected: _fulfillmentMode == 'DELIVERY',
-                              onTap: () {
-                                // The server refused this delivery as too far:
-                                // delivery is simply not on offer, and the
-                                // reason is shown beside the choice rather than
-                                // re-opened as a flow that ends in the same
-                                // refusal.
-                                if (_deliveryBeyondMax) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(
-                                      content: Text(_deliveryRefusal ??
-                                          'Delivery is not available this far '
-                                              'away. Choose self-pickup '
-                                              'instead.'),
-                                    ),
-                                  );
-                                  return;
-                                }
-                                setState(() {
-                                  _fulfillmentTouched = true;
-                                  _fulfillmentMode = 'DELIVERY';
-                                });
-                                // Choosing delivery is what starts the three
-                                // steps — vehicle, location, map — so the
-                                // buyer is never left with a delivery order
-                                // and no fee. Switching BACK to pickup is the
-                                // other card, which simply drops the fee out
-                                // of the total.
-                                _startDeliveryFlow();
-                              },
-                            ),
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: _FulfillmentCard(
-                              icon: Icons.store_outlined,
-                              title: _isBookingCart
-                                  ? 'I go to them'
-                                  : 'Self-pickup',
-                              subtitle: _isBookingCart
-                                  ? 'Pay the listing price only'
-                                  : 'Pay product price only',
-                              selected: _fulfillmentMode == 'SELF_PICKUP',
-                              onTap: () => setState(() {
-                                _fulfillmentTouched = true;
-                                _fulfillmentMode = 'SELF_PICKUP';
-                              }),
-                            ),
-                          ),
-                        ],
+                      const SizedBox(height: 4),
+                      Text(
+                        _isBookingCart
+                            ? 'Only what the booking needs. No account and no '
+                                'documents.'
+                            : 'Only what the delivery needs. No account and no '
+                                'documents.',
+                        style: const TextStyle(
+                            fontSize: 12, color: AppTheme.textMuted),
                       ),
+                      const SizedBox(height: 12),
+                      BirrTextField(
+                        label: 'Your name',
+                        controller: _nameCtrl,
+                        hint: 'Who is receiving the order',
+                        textCapitalization: TextCapitalization.words,
+                      ),
+                      const SizedBox(height: 12),
+                      BirrTextField(
+                        label: 'Phone number',
+                        controller: _phoneCtrl,
+                        keyboardType: TextInputType.phone,
+                        hint: _isBookingCart
+                            ? 'The provider calls this number'
+                            : 'The driver calls this number',
+                      ),
+                      if (!_isBookingCart) ...[
+                        const SizedBox(height: 12),
+                        BirrTextField(
+                          label: 'Delivery address',
+                          controller: _addressCtrl,
+                          maxLines: 2,
+                          hint: 'Street, area, city',
+                        ),
+                      ],
+                      const SizedBox(height: 12),
+                      BirrTextField(
+                        label: _isBookingCart
+                            ? 'Notes for the provider (optional)'
+                            : 'Notes for the driver (optional)',
+                        controller: _notesCtrl,
+                        maxLines: 2,
+                        hint: _isBookingCart
+                            ? 'Anything they should know before you arrive'
+                            : 'Landmark, floor, gate…',
+                      ),
+                      const SizedBox(height: 14),
+                      if (_isBookingCart) _bookingNote() else _deliveryReceipt(),
                       const SizedBox(height: 16),
                       // Delivery refused as too far: said once, in full, right
-                      // under the two choices — the number in it is the one
-                      // the server measured, so the buyer can see WHY the
-                      // delivery card bounced them rather than guessing.
-                      if (_deliveryBeyondMax) ...[
+                      // under the fields — the number in it is the one the
+                      // server measured, so the buyer can see WHY rather than
+                      // guessing.
+                      if (!_isBookingCart && _deliveryBeyondMax) ...[
                         Container(
                           width: double.infinity,
                           padding: const EdgeInsets.all(12),
@@ -907,54 +916,12 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
                               Expanded(
                                 child: Text(
                                   _deliveryRefusal ??
-                                      'Delivery is not available this far '
-                                          'away. Choose self-pickup instead.',
+                                      'Delivery is not available this far away.',
                                   style: const TextStyle(
                                       fontSize: 12.5, height: 1.45),
                                 ),
                               ),
                             ],
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                      ],
-                      if (_fulfillmentMode == 'DELIVERY') ...[
-                        const Text('Delivery Details',
-                            style: TextStyle(
-                                fontSize: 15, fontWeight: FontWeight.w600)),
-                        const SizedBox(height: 12),
-                        BirrTextField(
-                          label: 'Delivery Address',
-                          controller: _addressCtrl,
-                          maxLines: 2,
-                          hint: 'Street, area, city',
-                        ),
-                        const SizedBox(height: 12),
-                        _deliveryReceipt(),
-                        const SizedBox(height: 16),
-                      ],
-                      if (_fulfillmentMode == 'SELF_PICKUP') ...[
-                        Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                            color: AppTheme.primaryGreen.withOpacity(0.06),
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(
-                                color:
-                                    AppTheme.primaryGreen.withOpacity(0.25)),
-                          ),
-                          child: Text(
-                            _isBookingCart
-                                ? 'You pay the listing price only and go to the '
-                                    'provider at the time you agree. Their '
-                                    'contact details become available after '
-                                    'payment approval.'
-                                : 'Self-pickup: pay the product price only and '
-                                    'collect it from the provider. Their '
-                                    'contact details become available after '
-                                    'payment approval.',
-                            style: const TextStyle(fontSize: 12.5, height: 1.4),
                           ),
                         ),
                         const SizedBox(height: 16),
@@ -1023,68 +990,6 @@ class _UserCheckoutScreenState extends ConsumerState<UserCheckoutScreen> {
                     ],
                   ),
                 ),
-    );
-  }
-}
-
-/// Phase 4: delivery vs self-pickup selection card (shared across the
-/// product/service flow).
-class _FulfillmentCard extends StatelessWidget {
-  const _FulfillmentCard({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-    required this.selected,
-    required this.onTap,
-  });
-
-  final IconData icon;
-  final String title;
-  final String subtitle;
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: selected
-          ? AppTheme.primaryGreen.withOpacity(0.08)
-          : AppTheme.surface,
-      borderRadius: BorderRadius.circular(12),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: selected ? AppTheme.primaryGreen : AppTheme.cardBorder,
-              width: selected ? 1.4 : 0.5,
-            ),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Icon(icon,
-                  size: 20,
-                  color:
-                      selected ? AppTheme.primaryGreen : AppTheme.textMuted),
-              const SizedBox(height: 6),
-              Text(title,
-                  style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700,
-                      color: selected
-                          ? AppTheme.primaryGreen
-                          : AppTheme.textPrimary)),
-              Text(subtitle,
-                  style: const TextStyle(
-                      fontSize: 11, color: AppTheme.textMuted)),
-            ],
-          ),
-        ),
-      ),
     );
   }
 }

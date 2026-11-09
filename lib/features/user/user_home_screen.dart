@@ -1277,14 +1277,11 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
                   subtitle: 'Request a driver',
                   tint: AppTheme.primaryGreen,
                   onTap: () async {
-                    // GUEST INTERCEPTION — Book-a-ride is a transaction entry
-                    // point on a guest-open screen. The router would redirect
-                    // a guest to /signup/user anyway, but the dialog names
-                    // the action first so the form reads as the next step of
-                    // it rather than as a broken button (same rule as Buy).
-                    if (ref.read(guestModeProvider)) {
-                      await requestAccountToContinue(context,
-                          action: 'request a ride');
+                    // Book-a-ride needs an identity for the ride request, so
+                    // a guest opens the anonymous session here. No form, no
+                    // interruption of the flow.
+                    if (ref.read(guestModeProvider) &&
+                        !await ensureGuestCheckoutSession(context)) {
                       return;
                     }
                     context.push('/user/ride-request');

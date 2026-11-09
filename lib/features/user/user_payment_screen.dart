@@ -8,8 +8,8 @@ import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../core/services/active_order_store.dart';
 import '../../core/services/cart_service.dart';
-import '../../core/services/document_upload_service.dart';
 import '../../core/services/fee_resolver.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/friendly_error.dart';
@@ -43,13 +43,18 @@ class OrderDraft {
     this.deliveryDistanceKm,
     this.paymentDeferred = false,
     this.commissionPreview,
+    this.buyerName = '',
+    this.buyerPhone = '',
+    this.buyerNote = '',
   });
 
   final String providerId;
   final String providerName;
   final List<CartItem> items;
 
-  /// 'DELIVERY' or 'SELF_PICKUP' — the two the server knows.
+  /// Always 'DELIVERY' for a draft this build creates. The field and the
+  /// database value for the old pickup mode are kept readable for historical
+  /// orders, but nothing in this flow writes them any more.
   final String fulfillmentMode;
   final String deliveryAddress;
   final double? deliveryLat;
@@ -58,6 +63,13 @@ class OrderDraft {
   final String? deliveryVehicleName;
   final double deliveryFee;
   final double? deliveryDistanceKm;
+
+  /// The guest's own details, collected at checkout. A buyer has no registered
+  /// profile any more, so these are the delivery's identity: they are written
+  /// onto the order and released to the assigned driver only on arrival.
+  final String buyerName;
+  final String buyerPhone;
+  final String buyerNote;
 
   /// True for a listing whose provider must confirm it is available first. The
   /// order is placed now and paid later from the order screen, exactly as the
@@ -103,6 +115,9 @@ class OrderDraft {
         'delivery_fee': deliveryFee,
         'delivery_distance_km': deliveryDistanceKm,
         'payment_deferred': paymentDeferred,
+        'buyer_name': buyerName,
+        'buyer_phone': buyerPhone,
+        'buyer_note': buyerNote,
       };
 }
 
@@ -169,6 +184,14 @@ class _PaymentDraftStore {
               i.providerId == providerId && wanted.contains(i.productId))
           .toList();
       if (items.isEmpty) return null;
+      // A draft written by an older build for a PRODUCT can name the removed
+      // self-pickup mode. Resurrecting that would create an order the current
+      // checkout cannot describe (and with no delivery destination), so the
+      // honest answer is "nothing to pay for". A booking keeps that mode: it
+      // is how a service has always been ordered, and it is not a delivery.
+      final legacyPickup =
+          (raw['fulfillment_mode'] as String?) == 'SELF_PICKUP';
+      if (legacyPickup && !items.every((i) => i.isBooking)) return null;
       return OrderDraft(
         providerId: providerId,
         providerName:
@@ -176,8 +199,7 @@ class _PaymentDraftStore {
                 ? raw['provider_name'] as String
                 : 'The provider',
         items: items,
-        fulfillmentMode:
-            (raw['fulfillment_mode'] as String?) ?? 'SELF_PICKUP',
+        fulfillmentMode: legacyPickup ? 'SELF_PICKUP' : 'DELIVERY',
         deliveryAddress: (raw['delivery_address'] as String?) ?? '',
         deliveryLat: (raw['delivery_lat'] as num?)?.toDouble(),
         deliveryLng: (raw['delivery_lng'] as num?)?.toDouble(),
@@ -187,6 +209,9 @@ class _PaymentDraftStore {
         deliveryDistanceKm:
             (raw['delivery_distance_km'] as num?)?.toDouble(),
         paymentDeferred: (raw['payment_deferred'] as bool?) ?? false,
+        buyerName: (raw['buyer_name'] as String?) ?? '',
+        buyerPhone: (raw['buyer_phone'] as String?) ?? '',
+        buyerNote: (raw['buyer_note'] as String?) ?? '',
       );
     } catch (_) {
       return null;
@@ -206,18 +231,19 @@ class _PaymentDraftStore {
 ///
 /// So the flow is now two screens with one job each:
 ///
-///   checkout   — the basket, and HOW it arrives (delivery vehicle + point, or
-///                self-pickup). It ends at CONTINUE TO PAYMENT.
+///   checkout   — the basket, and HOW it arrives (delivery vehicle + point).
+///                It ends at CONTINUE TO PAYMENT.
 ///   payment    — the platform account the administrator configured in
 ///                Admin → Payment Settings, the amount and reference the buyer
 ///                writes down, the proof-of-payment photo, and PLACE ORDER.
 ///
 /// Everything that was wired before is still wired, only moved: the platform
 /// account card, the payment reference, the screenshot upload into
-/// `payment-proofs`, the National ID upload into `user-documents`, the
-/// availability gate's deferred-payment notice, the provider-readiness
-/// re-check with its waiting screen, and the same `order-create` call whose
-/// server-computed total is what the order records.
+/// `payment-proofs`, the availability gate's deferred-payment notice, the
+/// provider-readiness re-check with its waiting screen, and the same
+/// `order-create` call whose server-computed total is what the order records.
+/// No identity document is asked of a buyer: a buyer is a guest, and the
+/// delivery's identity is the name and phone collected at checkout.
 ///
 /// And when something goes wrong, the appeal door is HERE, on the screen where
 /// the money is, deep-linked straight into the admin Appeals queue that the
@@ -238,12 +264,10 @@ class _UserPaymentScreenState extends ConsumerState<UserPaymentScreen> {
   final _refCtrl = TextEditingController();
   final _amountCtrl = TextEditingController();
   File? _screenshot;
-  File? _nationalId;
   final _picker = ImagePicker();
 
   bool _loading = true;
   bool _submitting = false;
-  bool _needsNationalId = true;
   String? _error;
   DateTime? _lastOrderTime;
   bool _amountPrefilled = false;
@@ -314,23 +338,8 @@ class _UserPaymentScreenState extends ConsumerState<UserPaymentScreen> {
       _restored = await _PaymentDraftStore.restore();
     }
     await _refreshProviderReadiness();
-    // Whether this buyer still needs to give a National ID. Users sign up with
-    // only email/phone/password, so the ID is verified at the first purchase —
-    // read from user_documents, best-effort: a failure leaves the requirement
-    // in place, which is always the safe direction.
-    try {
-      final uid = _client.auth.currentUser?.id;
-      if (uid != null) {
-        final existing = await _client
-            .from('user_documents')
-            .select('id')
-            .eq('user_id', uid)
-            .eq('document_type', 'NATIONAL_ID')
-            .limit(1)
-            .maybeSingle();
-        if (existing != null) _needsNationalId = false;
-      }
-    } catch (_) {}
+    // No identity document is asked of a buyer any more: the buyer is a guest,
+    // and the delivery's identity is the name and phone collected at checkout.
     if (!mounted) return;
     setState(() => _loading = false);
   }
@@ -378,18 +387,6 @@ class _UserPaymentScreenState extends ConsumerState<UserPaymentScreen> {
     }
   }
 
-  Future<void> _pickNationalId() async {
-    final picked = await _picker.pickImage(
-      source: ImageSource.gallery,
-      maxWidth: 1920,
-      maxHeight: 1920,
-      imageQuality: 85,
-    );
-    if (picked != null && mounted) {
-      setState(() => _nationalId = File(picked.path));
-    }
-  }
-
   /// The appeal door. Every case an admin can act on lands in `appeal_cases`,
   /// which is exactly what the admin dashboard's Appeals card counts and
   /// `/admin/appeals` lists — so a buyer who hit a problem at the money step
@@ -431,14 +428,23 @@ class _UserPaymentScreenState extends ConsumerState<UserPaymentScreen> {
       setState(() => _error = 'Your cart is empty for this provider');
       return;
     }
-    if (!draft.paymentDeferred && _needsNationalId && _nationalId == null) {
-      setState(() => _error =
-          'Please upload a photo of your National ID to place an order');
-      return;
-    }
     if (draft.isDelivery && draft.deliveryAddress.trim().isEmpty) {
       setState(() => _error =
           'A delivery order needs an address. Go back and add one.');
+      return;
+    }
+    if (draft.isDelivery &&
+        (draft.deliveryLat == null || draft.deliveryLng == null)) {
+      setState(() => _error =
+          'Set the delivery point on the map. Go back to checkout to pin it.');
+      return;
+    }
+    // The approval gate verifies the payment, so a proof is required for the
+    // order to be approved. Asking here, before submission, is the only place
+    // the buyer can still fix it without a rejected request.
+    if (!draft.paymentDeferred && _screenshot == null) {
+      setState(() => _error =
+          'Attach the payment screenshot so the administrator can approve your order.');
       return;
     }
 
@@ -466,14 +472,17 @@ class _UserPaymentScreenState extends ConsumerState<UserPaymentScreen> {
     // is told their order failed, submits again, and creates a duplicate.
     String? createdOrderId;
     var orderCreated = false;
+    // Declared outside the try: the catch path needs to know whether this
+    // order is waiting for approval before it decides where to send the buyer.
+    var awaitingApproval = false;
     try {
       final client = _client;
 
       final writtenAmount = _amountCtrl.text.trim();
       final noteParts = <String>[
-        if (draft.fulfillmentMode == 'SELF_PICKUP') 'Fulfillment: self-pickup',
         if (draft.isDelivery && draft.deliveryAddress.trim().isNotEmpty)
           'Delivery: ${draft.deliveryAddress.trim()}',
+        if (!draft.isDelivery) 'Fulfillment: booking at the provider',
         // The amount the buyer wrote down, and why it is only a record: the
         // order's total is computed by the server from the public prices.
         if (writtenAmount.isNotEmpty && !draft.paymentDeferred)
@@ -503,10 +512,30 @@ class _UserPaymentScreenState extends ConsumerState<UserPaymentScreen> {
           'delivery_lng': draft.deliveryLng,
         if (draft.isDelivery && draft.deliveryVehicleId != null)
           'vehicle_category_id': draft.deliveryVehicleId,
+        // The guest's delivery identity. A buyer no longer registers, so these
+        // are the only name and number the driver ever needs — and they are
+        // released to that driver only when they mark arrival.
+        if (draft.buyerName.trim().isNotEmpty)
+          'buyer_name': draft.buyerName.trim(),
+        if (draft.buyerPhone.trim().isNotEmpty)
+          'buyer_phone': draft.buyerPhone.trim(),
+        if (draft.buyerNote.trim().isNotEmpty)
+          'buyer_note': draft.buyerNote.trim(),
+        // The admin approval gate. A deferred (availability-gated) order has
+        // not been paid yet, so it keeps its existing path — approval only
+        // makes sense once there is a payment proof to verify. A booking is
+        // not a delivery either: the approval queue assigns a vehicle and a
+        // driver, and a service has neither, so it keeps the provider's own
+        // booking flow.
+        'request_approval': !draft.paymentDeferred && draft.isDelivery,
       });
       final data = Map<String, dynamic>.from(result.data as Map);
       final order = data['order'] as Map<String, dynamic>?;
+      awaitingApproval = data['awaiting_approval'] == true;
       final orderId = order?['id'] as String?;
+      if (awaitingApproval && orderId != null) {
+        await ActiveOrderStore.save(orderId);
+      }
       createdOrderId = orderId;
       _createdOrderId = orderId;
       orderCreated = true;
@@ -514,24 +543,6 @@ class _UserPaymentScreenState extends ConsumerState<UserPaymentScreen> {
           onf.formatOrderNumber(order?['order_number'] as String?);
       if (orderNumber != null) {
         _createdOrderNumber = orderNumber;
-      }
-
-      // ID on file → uploaded with the same retry as signup. The order already
-      // exists, so a failed upload is reported, never re-submitted.
-      String? idIssue;
-      if (_needsNationalId && _nationalId != null) {
-        try {
-          await DocumentUploadService.instance.uploadAndRecord(
-            file: _nationalId!,
-            userId: client.auth.currentUser!.id,
-            documentType: 'NATIONAL_ID',
-          );
-        } catch (_) {
-          idIssue =
-              'Your order was placed, but the National ID photo could not be '
-              'uploaded. Open Profile → Verify Document (or Help & Support) to '
-              'retry so your identity can be verified.';
-        }
       }
 
       String? screenshotIssue;
@@ -576,8 +587,7 @@ class _UserPaymentScreenState extends ConsumerState<UserPaymentScreen> {
 
       if (!mounted) return;
       setState(() => _submitting = false);
-      final dialogMessage = idIssue ??
-          screenshotIssue ??
+      final dialogMessage = screenshotIssue ??
           (cartIssue
               ? 'Your order has been placed successfully, but your cart could '
                   'not be cleared automatically. Please empty it from the cart.'
@@ -591,26 +601,37 @@ class _UserPaymentScreenState extends ConsumerState<UserPaymentScreen> {
         barrierDismissible: false,
         builder: (dialogCtx) => AlertDialog(
           icon: Icon(
-              (idIssue != null || screenshotIssue != null)
+              screenshotIssue != null
                   ? Icons.warning_amber_rounded
                   : Icons.check_circle,
-              color: (idIssue != null || screenshotIssue != null)
+              color: screenshotIssue != null
                   ? AppTheme.warning
                   : AppTheme.success,
               size: 44),
-          title: const Text('Order placed'),
-          content: Text(dialogMessage),
+          title: Text(
+              awaitingApproval ? 'Request submitted' : 'Order placed'),
+          content: Text(
+            awaitingApproval
+                ? 'Your order${orderNumber != null ? ' $orderNumber' : ''} is '
+                    'waiting for the administrator to approve it and assign '
+                    'your vehicle and driver. The waiting screen updates by '
+                    'itself — you can close the app and come back.'
+                : dialogMessage,
+          ),
           actions: [
             TextButton(
               onPressed: () {
                 dialogCtx.pop();
-                if (orderId != null) {
+                if (awaitingApproval && orderId != null) {
+                  context.go('/user/checkout/waiting/$orderId');
+                } else if (orderId != null) {
                   context.go('/user/orders/$orderId');
                 } else {
                   context.go('/user?tab=1');
                 }
               },
-              child: const Text('VIEW ORDER'),
+              child: Text(
+                  awaitingApproval ? 'VIEW WAITING SCREEN' : 'VIEW ORDER'),
             ),
           ],
         ),
@@ -630,7 +651,9 @@ class _UserPaymentScreenState extends ConsumerState<UserPaymentScreen> {
           ),
         );
         context.go(createdOrderId != null
-            ? '/user/orders/$createdOrderId'
+            ? (awaitingApproval
+                ? '/user/checkout/waiting/$createdOrderId'
+                : '/user/orders/$createdOrderId')
             : '/user?tab=1');
         return;
       }
@@ -733,7 +756,6 @@ class _UserPaymentScreenState extends ConsumerState<UserPaymentScreen> {
                     // 4. The image upload.
                     _proofCard(),
                     const SizedBox(height: 8),
-                    if (_needsNationalId) _nationalIdCard(),
                   ] else
                     // The same notice the checkout shows before CONTINUE TO
                     // PAYMENT is pressed — one definition, so the two screens
@@ -819,7 +841,7 @@ class _UserPaymentScreenState extends ConsumerState<UserPaymentScreen> {
                       ? (draft.deliveryVehicleName == null
                           ? 'DELIVERY'
                           : 'DELIVERY · ${draft.deliveryVehicleName!.toUpperCase()}')
-                      : 'SELF-PICKUP',
+                      : 'BOOKING',
                   style: const TextStyle(
                       fontSize: 10,
                       fontWeight: FontWeight.w700,
@@ -988,12 +1010,12 @@ class _UserPaymentScreenState extends ConsumerState<UserPaymentScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text('Proof of payment (optional)',
+        const Text('Proof of payment',
             style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
         const SizedBox(height: 4),
         const Text(
-          'Tap to upload the screenshot or photo of your transfer. The admin '
-          'verifies your payment against it.',
+          'Required: attach the screenshot or photo of your transfer. The '
+          'administrator approves your checkout by verifying it.',
           style: TextStyle(fontSize: 12.5, color: AppTheme.textMuted),
         ),
         const SizedBox(height: 8),
@@ -1042,74 +1064,6 @@ class _UserPaymentScreenState extends ConsumerState<UserPaymentScreen> {
                           size: 32, color: AppTheme.textMuted),
                       SizedBox(height: 8),
                       Text('Tap to upload proof of payment',
-                          style: TextStyle(
-                              fontSize: 13, color: AppTheme.textMuted)),
-                    ],
-                  ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _nationalIdCard() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const SizedBox(height: 20),
-        Row(
-          children: [
-            const Expanded(
-              child: Text('National ID (required)',
-                  style: TextStyle(
-                      fontSize: 15, fontWeight: FontWeight.w600)),
-            ),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              decoration: BoxDecoration(
-                color: AppTheme.gold.withOpacity(0.12),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: const Text('VERIFICATION',
-                  style: TextStyle(
-                      fontSize: 10,
-                      fontWeight: FontWeight.w700,
-                      color: AppTheme.gold)),
-            ),
-          ],
-        ),
-        const SizedBox(height: 4),
-        const Text(
-            'First-time verification: we need a photo of your National ID to '
-            'confirm your identity. It is stored securely and only visible to '
-            'our admin team.',
-            style: TextStyle(fontSize: 12, color: AppTheme.textMuted)),
-        const SizedBox(height: 8),
-        GestureDetector(
-          onTap: _pickNationalId,
-          child: Container(
-            width: double.infinity,
-            height: _nationalId != null ? 160 : 110,
-            decoration: BoxDecoration(
-              color: AppTheme.creamDark,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(
-                  color: _nationalId != null
-                      ? AppTheme.primaryGreen
-                      : AppTheme.cardBorder),
-            ),
-            child: _nationalId != null
-                ? ClipRRect(
-                    borderRadius: BorderRadius.circular(12),
-                    child: Image.file(_nationalId!, fit: BoxFit.cover),
-                  )
-                : const Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(Icons.badge_outlined,
-                          size: 32, color: AppTheme.textMuted),
-                      SizedBox(height: 8),
-                      Text('Tap to upload your National ID',
                           style: TextStyle(
                               fontSize: 13, color: AppTheme.textMuted)),
                     ],

@@ -1,19 +1,18 @@
-// Guest mode, and the registration step that used to never finish.
+// Guest browsing, guest checkout, and the registration step that used to hang.
 //
-// Two things are pinned here, both of them decisions that are easy to undo by
-// accident and impossible to see in a screenshot:
+// The marketing rework changed what a "guest" is. It is no longer a wall in
+// front of a transaction that must be replaced by a registration form; it is an
+// ANONYMOUS Supabase session opened at the first transaction, under which the
+// order, the push token and the realtime subscription are scoped. The pins here
+// are the ones that are easy to undo by accident:
 //
-//   1. The guest gate fires on TRANSACTIONS, not on browsing. A build that
-//      widens `guestBlockedTransaction` locks a visitor out of the marketplace
-//      it just let them into; one that narrows it lets a guest reach checkout
-//      with no account and read an RLS refusal instead of a registration form.
-//      The routing itself is not unit-testable without a router and a server,
-//      so the RULE is tested directly and the wiring is checked below.
-//   2. The signup handler releases its full-screen "Creating account…" scrim
-//      in a `finally`, and the OTP endpoint is deployed so a signed-out signup
-//      can actually reach it. Both are the root cause of "registration hangs
-//      after submitting, never completes account creation": the scrim had no
-//      other exit, and the endpoint answered 401 before its body ran.
+//   1. the first screen is the dashboard, not a login wall;
+//   2. a guest may reach checkout, payment, their own order and the delivery
+//      map — all of them are scoped by auth.uid(), so the anonymous session is
+//      the security boundary, not a route gate;
+//   3. workspaces and account surfaces still send a guest to sign-in;
+//   4. buyer registration is gone from the router and from the guest helper;
+//   5. the signup scrim and the OTP endpoint stay fixed.
 import 'dart:io';
 
 import 'package:birr5/core/services/guest_session.dart';
@@ -27,29 +26,46 @@ String read(String path) {
 }
 
 void main() {
-  group('guest mode gates transactions, not browsing', () {
-    test('every transaction route is blocked', () {
+  group('the dashboard is the first screen for everybody', () {
+    test('no session lands on /user, never on a login wall', () {
+      final src = read('lib/routing/app_router.dart');
+      expect(src.contains("if (loc == '/') return '/user';"), isTrue);
+      expect(src.contains("if (loc == '/') return '/login';"), isFalse,
+          reason: 'the whole point of the rework is that browsing needs no '
+              'account');
+    });
+
+    test('workspaces are closed to a guest', () {
       for (final route in const [
-        '/user/availability',
-        '/user/checkout',
-        '/user/payment',
-        '/user/order-waiting',
-        '/user/ride-request',
-        '/user/orders/abc123',
-        // The order-shaped links outside /user/orders: receipts and review
-        // forms both attach to an order the guest never placed, so they get
-        // the registration form like the order detail does.
-        '/documents/order/abc123',
-        '/documents/ride/abc123',
-        '/review/new',
-        '/review/customer',
+        '/admin',
+        '/admin/checkout-requests',
+        '/admin-login',
+        '/staff/dashboard',
+        '/provider/orders',
+        '/vehicle/vehicles',
+        '/ceo',
+        '/wallet',
+        '/wallet/recharge',
+        '/points',
+        '/profile',
+        '/profile/edit',
+        '/appeals',
+        '/appeal',
+        '/help',
+        '/become-partner',
+        '/account/deletion',
+        '/account/password',
+        '/pending-approval',
+        '/rejected',
+        '/suspended',
+        '/complete-profile',
       ]) {
-        expect(guestBlockedTransaction(route), isTrue,
-            reason: '$route creates a transaction and needs an account');
+        expect(guestBlockedAccount(route), isTrue,
+            reason: '$route needs an account or a workspace');
       }
     });
 
-    test('browsing stays open', () {
+    test('browsing and the buyer transaction routes stay open', () {
       for (final route in const [
         '/user',
         '/user/search',
@@ -57,59 +73,82 @@ void main() {
         '/user/provider/pr1',
         '/user/category/c1',
         '/user/category-group/transport',
+        '/user/cart',
+        '/user/checkout',
+        '/user/payment',
+        '/user/orders/abc123',
+        '/user/orders/abc123/delivery',
+        '/user/checkout/waiting/abc123',
         '/map',
         '/about',
         '/terms',
         '/login',
-        '/signup/user',
       ]) {
-        expect(guestBlockedTransaction(route), isFalse,
-            reason: '$route is browsing and must not be gated');
         expect(guestBlockedAccount(route), isFalse,
-            reason: '$route is browsing and must not be gated');
+            reason: '$route is a buyer surface and must not be walled');
       }
     });
 
-    test('workspaces and account surfaces are closed to a guest', () {
-      for (final route in const [
-        '/admin',
-        // The admin sign-in is closed exactly like /staff/login: a guest
-        // gets the standard sign-in screen, never a workspace door.
-        '/admin-login',
-        '/staff/dashboard',
-        '/provider/orders',
-        '/vehicle/vehicles',
-        '/profile',
-        '/profile/edit',
-        '/wallet',
-        '/user/cart',
-        '/user/favorites',
-        '/user/ride-history',
-        // The trailing-slash entries: the old matcher appended '/' to every
-        // prefix, so '/account/' + '/' never matched these and a guest could
-        // open account deletion and password change outright. This is the
-        // regression pin — it fails on the matcher, not on the list.
-        '/account/deletion',
-        '/account/password',
-      ]) {
-        expect(guestBlockedAccount(route), isTrue,
-            reason: '$route needs an account or a workspace');
-      }
+    test('the removed buyer-registration gate is gone', () {
+      final guest = read('lib/core/services/guest_session.dart');
+      expect(guest.contains('guestBlockedTransaction'), isFalse);
+      expect(guest.contains('requestAccountToContinue'), isFalse);
+      expect(guest.contains("context.push('/signup/user')"), isFalse);
+
+      final router = read('lib/routing/app_router.dart');
+      expect(router.contains('guestBlockedTransaction'), isFalse);
     });
 
-    test('the transaction check wins over the account check', () {
-      // `/user/orders/x` is both, and the useful answer for somebody holding
-      // an order link is the registration form, not the sign-in screen.
-      expect(guestBlockedTransaction('/user/orders/x'), isTrue);
+    test('the old buyer signup link answers with the sign-in screen', () {
+      final router = read('lib/routing/app_router.dart');
+      final m = RegExp(
+              r"if \(r != 'vehicle' && r != 'service'\) \{\s*return const LoginScreen\(\);")
+          .hasMatch(router);
+      expect(m, isTrue,
+          reason: 'a buyer does not register; an existing one may still sign in');
     });
+  });
 
-    test('the interception always opens the STANDARD user signup', () {
+  group('guest checkout uses a real anonymous session', () {
+    test('the helper signs in anonymously and never opens a form', () {
       final src = read('lib/core/services/guest_session.dart');
-      expect(src.contains("context.push('/signup/user')"), isTrue,
-          reason: 'a guest must be sent to user registration, never to the '
-              'provider or staff-assisted paths');
-      expect(src.contains("'/signup/service'"), isFalse);
-      expect(src.contains("'/signup/vehicle'"), isFalse);
+      expect(src.contains('signInAnonymously'), isTrue);
+      expect(src.contains('signup'), isFalse,
+          reason: 'a guest checkout must not route through registration');
+    });
+
+    test('GuestMode defaults to browsing without an account', () {
+      final mode = GuestMode();
+      expect(mode.state, isTrue);
+      mode.end();
+      expect(mode.state, isFalse);
+      mode.start();
+      expect(mode.state, isTrue);
+    });
+
+    test('the buy button opens the session before writing the cart line', () {
+      final src = read('lib/core/widgets/product_buy_button.dart');
+      final ensure = src.indexOf('ensureGuestCheckoutSession');
+      // The CODE call, not the explanatory comment above it: the comment
+      // mentions addToCart before the session line, which made a plain
+      // indexOf compare the two in the wrong order.
+      final add = src.indexOf('CartService.instance.addToCart');
+      expect(ensure, greaterThanOrEqualTo(0));
+      expect(add, greaterThan(ensure),
+          reason: 'the cart row is scoped to auth.uid(), so the anonymous '
+              'session must exist first');
+    });
+
+    test('a guest is never treated as a real signed-in member', () {
+      final src = read('lib/core/providers/auth_provider.dart');
+      expect(src.contains('user?.isAnonymous'), isTrue);
+      final router = read('lib/routing/app_router.dart');
+      expect(router.contains('authState.isGuest'), isTrue,
+          reason: 'guest tabs and the sign-in doors depend on this');
+      expect(
+          router.contains('if (next.isAuthenticated && !next.isGuest)'), isTrue,
+          reason: 'ending guest mode for an anonymous session would turn the '
+              'buyer into a broken member account');
     });
   });
 
