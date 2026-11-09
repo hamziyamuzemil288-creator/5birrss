@@ -690,17 +690,22 @@ COMMENT ON FUNCTION public.prevent_payment_proof_self_verification() IS
 CREATE OR REPLACE FUNCTION public.admin_review_checkout_request(
   p_order_id uuid,
   p_decision text,
-  p_reason text DEFAULT NULL,
-  p_vehicle_category_id uuid DEFAULT NULL,
-  p_vehicle_id uuid DEFAULT NULL,
-  p_driver_provider_id uuid DEFAULT NULL,
   -- The reviewer, passed by the `checkout-review` Edge Function after it has
   -- verified the caller's JWT. It is not `auth.uid()` because this function
   -- is service-role only: the order's status change must run as a server
   -- write (prevent_order_self_privilege_escalation refuses a client-originated
   -- status change even for an admin JWT), and a service-role call has no
   -- auth.uid(). Taking the id as an argument keeps the audit trail exact.
-  p_admin_id uuid
+  --
+  -- p_admin_id comes before the optional parameters because PostgreSQL
+  -- requires every parameter after one with a default to have a default too.
+  -- The Edge Function calls this with named arguments, so the order is not
+  -- part of its contract.
+  p_admin_id uuid,
+  p_reason text DEFAULT NULL,
+  p_vehicle_category_id uuid DEFAULT NULL,
+  p_vehicle_id uuid DEFAULT NULL,
+  p_driver_provider_id uuid DEFAULT NULL
 )
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -978,7 +983,7 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION public.admin_review_checkout_request(uuid, text, text, uuid, uuid, uuid, uuid) IS
+COMMENT ON FUNCTION public.admin_review_checkout_request(uuid, text, uuid, text, uuid, uuid, uuid) IS
   'Service-role only, called by the checkout-review Edge Function after it has '
   'verified the reviewer''s ADMIN role. Approves (requires an approved, '
   'available vehicle from the driver''s fleet and a payment proof when the '
@@ -987,9 +992,9 @@ COMMENT ON FUNCTION public.admin_review_checkout_request(uuid, text, text, uuid,
   'notifications for buyer, driver and provider. The status change must be a '
   'server write, which is why this is not callable with an admin JWT.';
 
-REVOKE ALL ON FUNCTION public.admin_review_checkout_request(uuid, text, text, uuid, uuid, uuid, uuid)
+REVOKE ALL ON FUNCTION public.admin_review_checkout_request(uuid, text, uuid, text, uuid, uuid, uuid)
   FROM public, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.admin_review_checkout_request(uuid, text, text, uuid, uuid, uuid, uuid)
+GRANT EXECUTE ON FUNCTION public.admin_review_checkout_request(uuid, text, uuid, text, uuid, uuid, uuid)
   TO service_role;
 
 -- ---------------------------------------------------------------------------
