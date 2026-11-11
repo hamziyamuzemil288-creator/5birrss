@@ -13,6 +13,7 @@ import '../services/supabase_service.dart';
 import '../services/notification_service.dart';
 import '../services/provider_presence_service.dart';
 import '../services/security_notice_service.dart';
+import '../services/welcome_back_service.dart';
 import '../utils/friendly_error.dart';
 import '../utils/phone_formatter.dart';
 
@@ -222,7 +223,7 @@ class AuthNotifier extends StateNotifier<AuthState>
       final event = authState.event;
       final session = authState.session;
 
-      if (event == AuthChangeEvent.signedIn && session != null) {
+      if (isWelcomeBackSignInEvent(event) && session != null) {
         await _loadUserProfile(session.user);
         // New-device sign-in notice (20261025000001). Fired here rather than in
         // signIn() so the Google path is covered too, and skipped for an
@@ -234,6 +235,18 @@ class AuthNotifier extends StateNotifier<AuthState>
         if (!fresh) {
           // Best effort: cannot fail the login (see SecurityNoticeService).
           await SecurityNoticeService.noteLogin();
+        }
+
+        // "Welcome back" belongs ONLY on this event. `initialSession` and
+        // `tokenRefreshed` are handled below and deliberately do not call it:
+        // opening the app is not signing in, and refreshing a token is not a
+        // new session. The server uses the JWT session_id as the idempotency
+        // key and enforces a five-minute gap, so a duplicate listener event or
+        // a retry cannot double-send either.
+        if (!fresh &&
+            !session.user.isAnonymous &&
+            state.user?.id == session.user.id) {
+          unawaited(WelcomeBackService.instance.deliverAfterSignIn());
         }
       } else if (event == AuthChangeEvent.signedOut) {
         state = const AuthState(isLoading: false);

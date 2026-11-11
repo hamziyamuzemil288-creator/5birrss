@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart'
+    show kDebugMode, debugPrint, debugPrintStack;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -9,8 +11,10 @@ import '../../core/models/category.dart';
 import '../../core/models/product.dart';
 import '../../core/providers/auth_provider.dart' show cityProvider;
 import '../../core/resilience/app_failure.dart';
+import '../../core/resilience/failure_mapper.dart';
 import '../../core/resilience/safe_call.dart';
 import '../../core/services/city_service.dart';
+import '../../core/services/error_logger.dart';
 import '../../core/services/guest_session.dart';
 import '../../core/services/posting_gate.dart';
 import '../../core/services/ride_service.dart';
@@ -53,6 +57,36 @@ Map<String, dynamic> dashboardFeedParams({
 /// True when a page of `pageSize + 1` rows means there is another page.
 bool dashboardFeedHasMore(int returnedRows, int pageSize) =>
     returnedRows > pageSize;
+
+/// The sentence a failed grid shows. Never the raw PostgREST text.
+///
+/// The distinction that matters is PGRST202/203: the function the screen
+/// calls is missing or cannot be resolved. That is a server/deployment state,
+/// not a dead connection and not the buyer's data, so "check your connection"
+/// or "this category could not be loaded" would send them looking in the wrong
+/// place. The raw exception is logged separately, in debug builds and in the
+/// client error table, for whoever can act on it.
+String dashboardFeedErrorMessage(Object error) {
+  final raw = error.toString().toLowerCase();
+  final failure = error is AppFailure ? error : AppFailureMapper.map(error);
+  final code = (failure.code ?? '').toUpperCase();
+  final missingRpc = code == 'PGRST202' ||
+      code == 'PGRST203' ||
+      raw.contains('pgrst202') ||
+      raw.contains('pgrst203') ||
+      raw.contains('could not find the function');
+
+  if (missingRpc) {
+    return 'The product feed is being updated. Please try again in a few '
+        'minutes.';
+  }
+  if (failure.kind == AppFailureKind.network ||
+      failure.kind == AppFailureKind.timeout ||
+      failure.kind == AppFailureKind.serverBusy) {
+    return 'We could not reach the shop. Check your connection and try again.';
+  }
+  return 'Products are temporarily unavailable. Please try again.';
+}
 
 /// The chip order: the server's parent/sort order, with Other last.
 ///
@@ -370,9 +404,29 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
         _loading = false;
         _feedInitialLoading = false;
         _error = e.message;
-        _feedError = e.message;
+        _feedError = dashboardFeedErrorMessage(e);
       });
     }
+  }
+
+  /// Keep the exact exception for diagnosis without putting it on screen.
+  ///
+  /// `debugPrint` is the log a debug build writes to the device console. The
+  /// ErrorLogger copy is what survives on a release phone and reaches
+  /// `client_error_logs`. Both are fire-and-forget: a failed product read must
+  /// not be turned into a second failure by the logger.
+  void _logFeedFailure(Object error, StackTrace? stack, String where) {
+    if (kDebugMode) {
+      debugPrint('dashboard feed failed [$where]: $error');
+      if (stack != null) debugPrintStack(stackTrace: stack);
+    }
+    ErrorLogger.instance.logError(
+      error,
+      stack,
+      source: 'rpc',
+      context: 'home_product_feed',
+      details: {'where': where},
+    );
   }
 
   /// One round trip for the whole feed, so the tabs never render against
@@ -453,13 +507,12 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
       );
       feedProducts = page.products;
       feedHasMore = page.hasMore;
-    } catch (e) {
+    } catch (e, st) {
       // The rest of Home is still useful when the grid is not. The grid gets
       // its own error and retry underneath, rather than the whole screen
       // turning into an error page.
-      feedError = e is AppFailure
-          ? e.message
-          : 'The product feed could not be loaded.';
+      _logFeedFailure(e, st, 'home_product_feed');
+      feedError = dashboardFeedErrorMessage(e);
     }
 
     try {
@@ -467,8 +520,11 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
         'p_city': city.isEmpty ? null : city,
       });
       feedCategories = orderDashboardCategoryChips(rows as List);
-    } catch (_) {
+    } catch (e, st) {
       // All products still works without chips; the section is not hidden.
+      // Log the real reason rather than leaving an empty chip rail with no
+      // explanation in the console.
+      _logFeedFailure(e, st, 'home_product_categories');
       feedCategories = const [];
     }
 
@@ -609,13 +665,12 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
         _feedInitialLoading = false;
       });
       _hydrateReactions(page.products);
-    } catch (e) {
+    } catch (e, st) {
+      _logFeedFailure(e, st, 'home_product_feed (category switch)');
       if (!mounted || seq != _feedRequestSeq) return;
       setState(() {
         _feedInitialLoading = false;
-        _feedError = e is AppFailure
-            ? e.message
-            : 'This category could not be loaded.';
+        _feedError = dashboardFeedErrorMessage(e);
       });
     }
   }
@@ -644,7 +699,8 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
         _feedLoadingMore = false;
       });
       _hydrateReactions(page.products);
-    } catch (_) {
+    } catch (e, st) {
+      _logFeedFailure(e, st, 'home_product_feed (next page)');
       if (!mounted || seq != _feedRequestSeq) return;
       setState(() => _feedLoadingMore = false);
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1887,6 +1943,15 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
             const Icon(Icons.cloud_off_outlined,
                 color: AppTheme.warning, size: 26),
             const SizedBox(height: 8),
+            const Text(
+              'Products are temporarily unavailable',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                  color: AppTheme.textPrimary),
+            ),
+            const SizedBox(height: 4),
             Text(
               message,
               textAlign: TextAlign.center,

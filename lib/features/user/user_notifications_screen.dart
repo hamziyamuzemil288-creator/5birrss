@@ -463,6 +463,7 @@ class _UserNotificationsScreenState
     // for that reason; a type that is coloured but unlabelled reads as noise.
     if (type.contains('POINTS')) return Icons.stars_rounded;
     if (type.contains('APPEAL')) return Icons.gavel_outlined;
+    if (type.contains('WELCOME')) return Icons.waving_hand_outlined;
     return Icons.notifications_outlined;
   }
 }

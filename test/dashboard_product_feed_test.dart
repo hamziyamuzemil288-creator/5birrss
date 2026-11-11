@@ -71,6 +71,75 @@ void main() {
       expect(dashboardFeedHasMore(25, size), isTrue);
       expect(dashboardFeedHasMore(24, size), isFalse);
     });
+
+    test('zero, one, three, four and six products all fit one page', () {
+      for (final count in [0, 1, 3, 4, 6]) {
+        expect(
+          dashboardFeedHasMore(count, kDashboardFeedPageSize),
+          isFalse,
+          reason: 'a short category must show its end state immediately, not '
+              'ask for an empty next page',
+        );
+      }
+    });
+  });
+
+  group('dashboard error sentence', () {
+    test('a missing server function is a deploy state, not a dead connection',
+        () {
+      final message = dashboardFeedErrorMessage(Exception(
+        'PostgrestException(code: PGRST202, message: Could not find the '
+        'function public.home_product_feed(uuid, integer, integer, text) in '
+        'the schema cache.)',
+      ));
+      expect(message.toLowerCase(), contains('updated'));
+      expect(message.toLowerCase(), isNot(contains('category')));
+      expect(message.toLowerCase(), isNot(contains('connection')));
+    });
+
+    test('a network failure tells the buyer what to check', () {
+      final message = dashboardFeedErrorMessage(
+        Exception('SocketException: Failed host lookup'),
+      );
+      expect(message.toLowerCase(), contains('connection'));
+    });
+
+    test('an unknown failure is still useful and never raw', () {
+      final message = dashboardFeedErrorMessage(Exception('boom'));
+      expect(message, 'Products are temporarily unavailable. Please try again.');
+      expect(message, isNot(contains('Exception')));
+    });
+
+    test('the raw error is kept for debug logs and the error table', () {
+      final source = File(
+        'lib/features/user/user_home_screen.dart',
+      ).readAsStringSync();
+      expect(source, contains('dashboard feed failed'));
+      expect(source, contains('ErrorLogger.instance.logError'));
+      expect(source, contains("'home_product_categories'"));
+    });
+  });
+
+  group('dashboard grid layout', () {
+    test('the grid is three across and the page size fills whole rows', () {
+      final source = File(
+        'lib/features/user/user_home_screen.dart',
+      ).readAsStringSync();
+      expect(source, contains('crossAxisCount: 3'));
+      expect(kDashboardFeedPageSize % 3, 0);
+    });
+
+    test('the compact card carries image, name, price, provider and city', () {
+      final source = File(
+        'lib/core/widgets/dashboard_product_card.dart',
+      ).readAsStringSync();
+      expect(source, contains('CachedNetworkImage'));
+      expect(source, contains('_ImageFallback'));
+      expect(source, contains('product.name'));
+      expect(source, contains('formattedDisplayPrice'));
+      expect(source, contains('ProviderNameTag'));
+      expect(source, contains('city'));
+    });
   });
 
   group('dashboard category chips', () {
