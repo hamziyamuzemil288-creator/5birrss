@@ -9172,8 +9172,9 @@ def check_one_action_per_listing_and_no_provider_control_where_buyers_browse() -
             "user_home_screen.dart opens the add-product form without the "
             "posting gate — an unverified, unfunded provider reaches the form")
 
-    # 3. the discovery reads exclude photo-less listings; the provider page
-    #    keeps them and renders the card without an image box.
+    # 3. category/search discovery excludes photo-less listings; the dashboard
+    #    feed is photo-optional and renders the card placeholder; the provider
+    #    page keeps them and renders the card without an image box.
     visible_target, visible_src = last_migration_defining(
         "visible_products_for_city")
     if visible_target is None:
@@ -9201,10 +9202,36 @@ def check_one_action_per_listing_and_no_provider_control_where_buyers_browse() -
             if needle not in sbody:
                 problems.append("%s: %s" % (search_target.name, why))
 
-    if ".where((p) => p.hasPhoto)" not in home:
+    feed_target, feed_src = last_migration_defining("home_product_feed")
+    if feed_target is None:
+        problems.append("no migration defines public.home_product_feed()")
+    else:
+        fbody = function_body(feed_src, "home_product_feed")
+        if "product_images" in fbody.lower():
+            problems.append(
+                "%s: home_product_feed still hides photo-less listings — the "
+                "dashboard must show every public listing with the card "
+                "placeholder" % feed_target.name)
+
+    cat_target, cat_src = last_migration_defining("home_product_categories")
+    if cat_target is None:
+        problems.append("no migration defines public.home_product_categories()")
+    else:
+        cbody = function_body(cat_src, "home_product_categories").lower()
+        if "c.parent_id is null" not in cbody:
+            problems.append(
+                "%s: home_product_categories no longer returns every main "
+                "category regardless of listing count" % cat_target.name)
+        if "product_images" in cbody:
+            problems.append(
+                "%s: home_product_categories still counts only photo-backed "
+                "listings" % cat_target.name)
+
+    if ".where((p) => p.hasPhoto)" in home:
         problems.append(
-            "user_home_screen.dart does not drop photo-less listings from the "
-            "feed — the home rail is a discovery surface")
+            "user_home_screen.dart still drops photo-less listings from the "
+            "feed — the dashboard shows every public listing with the "
+            "placeholder")
     if "listingType: (j['listing_type'] as String?) ?? 'PRODUCT'," not in home:
         problems.append(
             "user_home_screen.dart: the feed's mapping dropped listing_type "
@@ -10113,8 +10140,8 @@ CHECKS = [
      "act on it",
      check_appeal_notifications_reach_reviewers),
     ("one BUY/BOOK per listing from its own type, no provider control where "
-     "buyers browse, photo-less listings private, and trending ranked by the "
-     "last 7 days",
+     "buyers browse, photo-less listings private everywhere except the "
+     "dashboard, and trending ranked by the last 7 days",
      check_one_action_per_listing_and_no_provider_control_where_buyers_browse),
     ("the Parts 1-8 registration rework is wired: server halves, client doors",
      check_registration_rework_is_wired),

@@ -192,10 +192,12 @@ and `create_provider_vehicle` refuse with the reason-carrying code
 `PROVIDER_NOT_FULFILMENT_READY`, translated by `friendly_error()`.
 
 A new listing needs **no admin approval**: `listing_status` defaults
-`ACTIVE`, `is_active` defaults true, and photo-less listings are simply
-private to discovery (`20261011000001` — `search_products` and
-`visible_products_for_city` require a `product_images` row; the provider's own
-page still shows text-only listings). Images upload straight from the form to
+`ACTIVE`, `is_active` defaults true, and photo-less listings stay out of
+search and the category directory (`20261011000001` — `search_products` and
+`visible_products_for_city` require a `product_images` row), while the
+dashboard's Fresh Finds grid shows them with its card placeholder
+(`20261112000002`). The provider's own page also shows text-only listings.
+Images upload straight from the form to
 `product-images/{uid}/{productId}/…` and the card renders them cached with
 `BoxFit.contain` (no crop).
 

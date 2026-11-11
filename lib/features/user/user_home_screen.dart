@@ -492,10 +492,10 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
     }
 
     // 2. The product grid. The SERVER owns the public rule and the paging:
-    //    approved, non-deleted providers; active/available listings; an image;
-    //    the selected category and its descendants; 24 rows at a time. The
-    //    dashboard used to read `products` directly, which had none of those
-    //    guarantees and stopped at 20 rows.
+    //    approved, non-deleted providers; active/available listings; no photo
+    //    required; the selected category and its descendants; 24 rows at a
+    //    time. The dashboard used to read `products` directly, which had none
+    //    of those guarantees and stopped at 20 rows.
     var feedProducts = <Product>[];
     var feedHasMore = false;
     String? feedError;
@@ -604,10 +604,8 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
 
     // One batched image read for the whole page. The RPC returns `products`,
     // not a table join, so the cover photo is attached here before the model
-    // is parsed — never one query per card.
-    // A failed image read becomes the grid's retry state, not an empty grid:
-    // the server guarantees a photo, so "no photos" here means the image query
-    // failed, and an empty-state message would be a lie.
+    // is parsed — never one query per card. An empty result is normal now:
+    // photo-less listings use DashboardProductCard's placeholder.
     final images = await _fetchProductImages(pageRows);
     for (final row in pageRows) {
       row['product_images'] =
@@ -939,23 +937,18 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
     );
   }
 
-  /// The feed's listings as models: parsed, typed, and with the photo-less ones
-  /// dropped.
+  /// The feed's listings as models, parsed and typed. A listing without a
+  /// photo is kept: DashboardProductCard renders its existing placeholder.
   ///
   /// `listing_type` is what decides whether a card says BUY or BOOK, and this
   /// mapping used to omit it entirely — so every card in the feed was a
   /// PRODUCT, and a service in the rail read BUY like a tin of paint. It is
   /// read here now, once for the whole rail.
   ///
-  /// A listing with no photo never reaches the grid: it is dropped here, in the
-  /// read that feeds the feed, because a text-only listing belongs on its own
-  /// provider's page (where the shared card renders it with no image box) and
-  /// never in general discovery. This is the one discovery read the client
-  /// owns, so the rule sits here for it; the category screen's
-  /// `visible_products_for_city` and the search screen's `search_products`
-  /// carry the same exclusion server-side (migration 20261011000001).
-  /// `products_public_read` deliberately does not: that same policy also
-  /// answers the provider page, which must keep showing the listing.
+  /// Search and the category directory still exclude photo-less listings
+  /// server-side (`20261011000001`). The dashboard is deliberately different:
+  /// it shows every public listing, with the card's placeholder standing in
+  /// for the missing photo.
   static List<Product> _toProducts(List rows) {
     return rows.map((j) {
       final imgs = (j['product_images'] as List?)
@@ -988,10 +981,9 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
         updatedAt: DateTime.parse(j['updated_at']),
         images: imgs,
       );
-      // Discovery stays photo-first: a listing with no image is not shown on
-      // Home (the existing marketplace rule), while a photo whose URL fails to
-      // load still gets DashboardProductCard's placeholder.
-    }).where((p) => p.hasPhoto).toList();
+      // No hasPhoto filter: the card draws its placeholder for a listing with
+      // no image, or for a photo URL that fails to load.
+    }).toList();
   }
 
   @override
@@ -1994,9 +1986,7 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
             ),
             const SizedBox(height: 10),
             Text(
-              scoped
-                  ? 'No products in $_feedCategoryLabel yet'
-                  : 'No products available yet',
+              scoped ? 'No products here yet' : 'No products available yet',
               textAlign: TextAlign.center,
               style: const TextStyle(
                   fontSize: 14,
@@ -2004,11 +1994,12 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
                   color: AppTheme.textPrimary),
             ),
             const SizedBox(height: 4),
-            const Text(
-              'Approved providers who publish a listing with a photo appear '
-              'here.',
+            Text(
+              scoped
+                  ? 'Nothing has been listed in $_feedCategoryLabel yet.'
+                  : 'Approved providers who publish a listing appear here.',
               textAlign: TextAlign.center,
-              style: TextStyle(
+              style: const TextStyle(
                   fontSize: 12, height: 1.4, color: AppTheme.textMuted),
             ),
             if (scoped) ...[

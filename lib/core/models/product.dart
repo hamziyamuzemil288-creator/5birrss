@@ -144,9 +144,8 @@ class Product {
   /// upload path writes first — `product_images` has no `is_primary` column,
   /// so sort order is the only truth there is. The shared helpers in
   /// `core/widgets/product_card.dart` apply the same rule to a raw
-  /// `product_images` result, and `hasPhoto` is what a public discovery read
-  /// uses to keep a photo-less listing out of the feed (it belongs on its own
-  /// provider's page, where it renders as a text-only card).
+  /// `product_images` result. `hasPhoto` distinguishes a text-only listing;
+  /// the dashboard still shows it and renders its placeholder.
   String? get coverStoragePath {
     final sorted = [...images]..sort((a, b) => a.sortOrder.compareTo(b.sortOrder));
     for (final image in sorted) {
