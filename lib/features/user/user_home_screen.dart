@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -16,15 +18,76 @@ import '../../core/services/product_like_service.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/category_icons.dart';
 import '../../core/widgets/cart_icon_button.dart';
+import '../../core/widgets/dashboard_product_card.dart';
 import '../../core/widgets/product_buy_button.dart';
-import '../../core/widgets/product_card.dart';
 import '../../core/widgets/shimmer_effect.dart';
+import '../../core/widgets/system_banner.dart';
 import 'city_switcher_sheet.dart';
 import 'user_category_group_screen.dart';
 // The bell's badge reads this screen's own provider, so the count and the
 // inbox can never disagree about what "unread" means.
 import 'user_notifications_screen.dart' show unreadNotificationsCountProvider;
-import '../../core/widgets/system_banner.dart';
+
+/// The dashboard grid's page size. A multiple of three is deliberate: every
+/// page fills whole rows in a three-column grid, so the last row is never a
+/// surprising single tile in the middle of a scroll.
+const int kDashboardFeedPageSize = 24;
+
+/// One request for one page. The server receives `pageSize + 1`, which is how
+/// the client knows whether another page exists without a second COUNT query.
+Map<String, dynamic> dashboardFeedParams({
+  required String? categoryId,
+  required int offset,
+  String city = '',
+  int pageSize = kDashboardFeedPageSize,
+}) {
+  final trimmedCity = city.trim();
+  return {
+    'p_category_id': categoryId,
+    'p_limit': pageSize + 1,
+    'p_offset': offset,
+    'p_city': trimmedCity.isEmpty ? null : trimmedCity,
+  };
+}
+
+/// True when a page of `pageSize + 1` rows means there is another page.
+bool dashboardFeedHasMore(int returnedRows, int pageSize) =>
+    returnedRows > pageSize;
+
+/// The chip order: the server's parent/sort order, with Other last.
+///
+/// The SQL function already returns this order; applying the same rule in Dart
+/// keeps a cached/older response from ever painting Other in the middle.
+List<Map<String, dynamic>> orderDashboardCategoryChips(Iterable<dynamic> rows) {
+  final list = rows
+      .whereType<Map>()
+      .map((row) => Map<String, dynamic>.from(row))
+      .where((row) => (row['category_id']?.toString() ?? '').isNotEmpty)
+      .toList();
+
+  int number(dynamic value) => value is num ? value.toInt() : 0;
+  bool isOther(Map<String, dynamic> row) {
+    final name = (row['name']?.toString() ?? '').trim().toLowerCase();
+    return name == 'other' || name == 'other services';
+  }
+
+  list.sort((a, b) {
+    final other = (isOther(a) ? 1 : 0).compareTo(isOther(b) ? 1 : 0);
+    if (other != 0) return other;
+    final parentSort = number(a['parent_sort_order'])
+        .compareTo(number(b['parent_sort_order']));
+    if (parentSort != 0) return parentSort;
+    final parentNull = (a['parent_id'] == null ? 0 : 1)
+        .compareTo(b['parent_id'] == null ? 0 : 1);
+    if (parentNull != 0) return parentNull;
+    final sort = number(a['sort_order']).compareTo(number(b['sort_order']));
+    if (sort != 0) return sort;
+    return (a['name']?.toString() ?? '')
+        .toLowerCase()
+        .compareTo((b['name']?.toString() ?? '').toLowerCase());
+  });
+  return list;
+}
 
 /// The user home:
 ///
@@ -106,19 +169,25 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
   /// error, because the feed is still fully usable without it.
   List<Map<String, dynamic>> _galleryProviders = const [];
 
-  /// Published provider-gallery photos for the feed (visible_gallery_for_city),
-  /// mixed into Fresh Finds. A photo a provider uploads used to surface only as
-  /// one trending tile's image — and only for the providers the rail happened
-  /// to carry — so a provider outside the rail could add a photo that appeared
-  /// nowhere a buyer browses. The list is city-scoped exactly as the product
-  /// rail is: the browse city, or every city when it is empty.
-  List<Map<String, dynamic>> _galleryImages = const [];
+  /// The dashboard grid's category chips, from `home_product_categories`.
+  /// The first chip is always All products (selected when this is null).
+  List<Map<String, dynamic>> _feedCategories = const [];
+  String? _feedCategoryId;
 
-  /// The published price range of each gallery photo's provider, by provider
-  /// id. A gallery photo is not a listing and carries no price of its own, so
-  /// this is what the shared card's price line reads for one — falling back to
-  /// the rail's own rows for the providers it carries.
-  Map<String, String> _galleryPrices = const {};
+  /// The current category's loaded page(s). Kept separate from the home's
+  /// other reads so a chip switch can empty and refill only the grid.
+  bool _feedInitialLoading = false;
+  bool _feedLoadingMore = false;
+  bool _feedHasMore = false;
+  String? _feedError;
+  int _feedOffset = 0;
+
+  /// Bumped on every chip switch. A response whose sequence is stale is
+  /// dropped, which is what stops a fast All → Electronics → Construction
+  /// sequence painting Electronics' rows under the Construction chip.
+  int _feedRequestSeq = 0;
+
+  final ScrollController _feedScroll = ScrollController();
 
   bool _loading = true;
   String? _error;
@@ -142,8 +211,18 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
   void initState() {
     super.initState();
     _cityService.addListener(_onBrowseCityChanged);
+    _feedScroll.addListener(_onFeedScroll);
     _load();
     _announceUnreadOnce();
+  }
+
+  /// Infinite scroll over the SAME scroll view the dashboard already uses.
+  /// A nested GridView would either swallow the gesture or need its own
+  /// scrollbar; asking the one controller how much is left avoids both.
+  void _onFeedScroll() {
+    if (!_feedScroll.hasClients) return;
+    if (_feedScroll.position.extentAfter > 420) return;
+    unawaited(_loadMoreFeed());
   }
 
   /// True once this process has greeted the reader. A static rather than a
@@ -232,13 +311,24 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
   @override
   void dispose() {
     _cityService.removeListener(_onBrowseCityChanged);
+    _feedScroll.removeListener(_onFeedScroll);
+    _feedScroll.dispose();
     super.dispose();
   }
 
   Future<void> _load() async {
+    // A pull-to-refresh while the previous page is still arriving must not let
+    // that page append itself to the fresh grid. The reload gets a new
+    // sequence, exactly as a chip switch does.
+    _feedRequestSeq++;
     setState(() {
       _loading = true;
       _error = null;
+      _feedInitialLoading = true;
+      _feedLoadingMore = false;
+      _feedHasMore = false;
+      _feedOffset = 0;
+      _feedError = null;
     });
     try {
       // withRetry, not a bare await: this is the app's first screen and the
@@ -254,15 +344,18 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
         _products = data['products'] as List<Product>;
         _activeRide = data['activeRide'] as Map<String, dynamic>?;
         _galleryProviders = data['providers'] as List<Map<String, dynamic>>;
-        _galleryImages = data['gallery'] as List<Map<String, dynamic>>;
-        _galleryPrices =
-            Map<String, String>.from(data['galleryPrices'] as Map);
         _providerImages =
             Map<String, String>.from(data['providerImages'] as Map);
         _verifiedProviders =
             Set<String>.from(data['verified'] as Set);
         _rankedCategories =
             List<Map<String, dynamic>>.from(data['ranked'] as List);
+        _feedCategories =
+            List<Map<String, dynamic>>.from(data['feedCategories'] as List);
+        _feedHasMore = data['feedHasMore'] == true;
+        _feedOffset = _products.length;
+        _feedError = data['feedError'] as String?;
+        _feedInitialLoading = false;
         _loading = false;
         _error = null;
         // Who liked what. A grid of cards must cost one query, not one per
@@ -275,7 +368,9 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
       if (!mounted) return;
       setState(() {
         _loading = false;
+        _feedInitialLoading = false;
         _error = e.message;
+        _feedError = e.message;
       });
     }
   }
@@ -342,44 +437,40 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
       // Keep the sort_order the categories query already gave us.
     }
 
-    // 2. The ranked product rail. Scoped to the browse city — EXCEPT when the
-    //    browse city is empty, which is the city switcher's "All cities"
-    //    option and means "do not filter". 
-    final productsQuery = client
-        .from('products')
-        .select('*, product_images(*)')
-        .eq('is_active', true);
-    final scopedProducts = city.isEmpty
-        ? productsQuery
-        : productsQuery.or('city.eq.$city,city.is.null');
-    final prodData = await scopedProducts
-        .order('sales_count', ascending: false, nullsFirst: false)
-        .order('created_at', ascending: false)
-        .limit(20);
-
-    // 2b. Published gallery photos, for the mixed Fresh Finds feed. Best-effort:
-    //     a failed gallery read must not take the feed down, and an empty list
-    //     simply renders the products alone — what the feed shipped with.
-    List<Map<String, dynamic>> gallery = const [];
+    // 2. The product grid. The SERVER owns the public rule and the paging:
+    //    approved, non-deleted providers; active/available listings; an image;
+    //    the selected category and its descendants; 24 rows at a time. The
+    //    dashboard used to read `products` directly, which had none of those
+    //    guarantees and stopped at 20 rows.
+    var feedProducts = <Product>[];
+    var feedHasMore = false;
+    String? feedError;
+    var feedCategories = <Map<String, dynamic>>[];
     try {
-      final rows = await client.rpc('visible_gallery_for_city', params: {
-        'p_city': city,
-        'p_limit': 60,
-      });
-      gallery = List<Map<String, dynamic>>.from(rows as List);
-    } catch (_) {
-      gallery = const [];
+      final page = await _fetchFeedPage(
+        categoryId: _feedCategoryId,
+        offset: 0,
+      );
+      feedProducts = page.products;
+      feedHasMore = page.hasMore;
+    } catch (e) {
+      // The rest of Home is still useful when the grid is not. The grid gets
+      // its own error and retry underneath, rather than the whole screen
+      // turning into an error page.
+      feedError = e is AppFailure
+          ? e.message
+          : 'The product feed could not be loaded.';
     }
 
-    // 2c. The price range each gallery photo's provider publishes.
-    //
-    // The shared card always carries a price, and a provider photo has no
-    // listing price of its own — `visible_gallery_for_city` returns none — so
-    // the price line reads the provider's headline range, the same number the
-    // trending rail already shows for them. One batched read for the whole
-    // mixed-in set, best-effort: a card with no range still says "See prices"
-    // rather than inventing a number.
-    final galleryPrices = await _resolveGalleryPriceRanges(gallery);
+    try {
+      final rows = await client.rpc('home_product_categories', params: {
+        'p_city': city.isEmpty ? null : city,
+      });
+      feedCategories = orderDashboardCategoryChips(rows as List);
+    } catch (_) {
+      // All products still works without chips; the section is not hidden.
+      feedCategories = const [];
+    }
 
     // 3. Active ride, best-effort. A failed lookup here must not take the
     //    whole feed down — the feed is still useful without the banner.
@@ -420,7 +511,10 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
 
     return {
       'categories': categories,
-      'products': _toProducts(prodData as List),
+      'products': feedProducts,
+      'feedHasMore': feedHasMore,
+      'feedError': feedError,
+      'feedCategories': feedCategories,
       'activeRide': activeRide,
       'providers': providers,
       'providerImages': imageMaps,
@@ -428,9 +522,148 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
       // The weekly ranking, narrowed to small categories and capped to the
       // rail. The full list already sorted the mother categories above.
       'ranked': rail,
-      'gallery': gallery,
-      'galleryPrices': galleryPrices,
     };
+  }
+
+  /// One page of the public feed. The RPC returns `pageSize + 1` rows on
+  /// purpose: the extra row is the "there is another page" signal, so the grid
+  /// never has to run a second COUNT query or show a spinner at the exact end.
+  Future<({List<Product> products, bool hasMore})> _fetchFeedPage({
+    required String? categoryId,
+    required int offset,
+  }) async {
+    final client = Supabase.instance.client;
+    final city = ref.read(cityProvider).activeCity;
+    final rows = await client.rpc('home_product_feed', params: {
+      ...dashboardFeedParams(
+        categoryId: categoryId,
+        offset: offset,
+        city: city,
+      ),
+    });
+    final raw = List<Map<String, dynamic>>.from(rows as List);
+    final hasMore = dashboardFeedHasMore(raw.length, kDashboardFeedPageSize);
+    final pageRows =
+        hasMore ? raw.take(kDashboardFeedPageSize).toList() : raw;
+
+    // One batched image read for the whole page. The RPC returns `products`,
+    // not a table join, so the cover photo is attached here before the model
+    // is parsed — never one query per card.
+    // A failed image read becomes the grid's retry state, not an empty grid:
+    // the server guarantees a photo, so "no photos" here means the image query
+    // failed, and an empty-state message would be a lie.
+    final images = await _fetchProductImages(pageRows);
+    for (final row in pageRows) {
+      row['product_images'] =
+          images[(row['id'] ?? '').toString()] ?? const <Map<String, dynamic>>[];
+    }
+
+    return (products: _toProducts(pageRows), hasMore: hasMore);
+  }
+
+  Future<Map<String, List<Map<String, dynamic>>>> _fetchProductImages(
+    List<Map<String, dynamic>> rows,
+  ) async {
+    final ids = rows
+        .map((row) => (row['id'] ?? '').toString())
+        .where((id) => id.isNotEmpty)
+        .toList();
+    if (ids.isEmpty) return const {};
+    final data = await Supabase.instance.client
+        .from('product_images')
+        .select('id, product_id, storage_path, sort_order')
+        .inFilter('product_id', ids)
+        .order('sort_order');
+    final out = <String, List<Map<String, dynamic>>>{};
+    for (final raw in data as List) {
+      final image = Map<String, dynamic>.from(raw as Map);
+      final productId = (image['product_id'] ?? '').toString();
+      if (productId.isEmpty) continue;
+      (out[productId] ??= []).add(image);
+    }
+    return out;
+  }
+
+  /// Reload the grid for the current chip. The sequence bump is the shield
+  /// against a slow response for the old category painting under the new chip.
+  Future<void> _reloadFeed() async {
+    final seq = ++_feedRequestSeq;
+    setState(() {
+      _feedInitialLoading = true;
+      _feedLoadingMore = false;
+      _feedError = null;
+      _feedHasMore = false;
+      _feedOffset = 0;
+      _products = const [];
+    });
+    try {
+      final page = await _fetchFeedPage(
+        categoryId: _feedCategoryId,
+        offset: 0,
+      );
+      if (!mounted || seq != _feedRequestSeq) return;
+      setState(() {
+        _products = page.products;
+        _feedHasMore = page.hasMore;
+        _feedOffset = page.products.length;
+        _feedInitialLoading = false;
+      });
+      _hydrateReactions(page.products);
+    } catch (e) {
+      if (!mounted || seq != _feedRequestSeq) return;
+      setState(() {
+        _feedInitialLoading = false;
+        _feedError = e is AppFailure
+            ? e.message
+            : 'This category could not be loaded.';
+      });
+    }
+  }
+
+  Future<void> _selectFeedCategory(String? categoryId) async {
+    if (_feedCategoryId == categoryId) return;
+    setState(() => _feedCategoryId = categoryId);
+    await _reloadFeed();
+  }
+
+  Future<void> _loadMoreFeed() async {
+    if (!_feedHasMore || _feedLoadingMore || _feedInitialLoading) return;
+    final seq = _feedRequestSeq;
+    final offset = _feedOffset;
+    setState(() => _feedLoadingMore = true);
+    try {
+      final page = await _fetchFeedPage(
+        categoryId: _feedCategoryId,
+        offset: offset,
+      );
+      if (!mounted || seq != _feedRequestSeq) return;
+      setState(() {
+        _products = [..._products, ...page.products];
+        _feedOffset = offset + page.products.length;
+        _feedHasMore = page.hasMore;
+        _feedLoadingMore = false;
+      });
+      _hydrateReactions(page.products);
+    } catch (_) {
+      if (!mounted || seq != _feedRequestSeq) return;
+      setState(() => _feedLoadingMore = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('More products could not be loaded. Scroll to retry.'),
+        ),
+      );
+    }
+  }
+
+  String get _feedCategoryLabel {
+    final id = _feedCategoryId;
+    if (id == null) return 'All products';
+    for (final row in _feedCategories) {
+      if (row['category_id']?.toString() == id) {
+        return (row['name']?.toString() ?? 'This category').trim();
+      }
+    }
+    return 'This category';
   }
 
   /// The chips above Fresh Finds: the SMALL categories, ordered by this week.
@@ -480,51 +713,6 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
     }
     if (motherOf.isEmpty) return const [];
     return subcategoryRailOrder(ranked, motherOf);
-  }
-
-  /// The published price range of every provider behind the mixed-in gallery
-  /// photos, keyed by provider id.
-  ///
-  /// `public_provider_profiles` is the view the app already reads provider
-  /// pages from (APPROVED providers, buyer-visible columns only), so this adds
-  /// no policy and no migration. Batched, never per tile, and best-effort: an
-  /// unreadable answer is an empty map, and the card has a fallback for that.
-  Future<Map<String, String>> _resolveGalleryPriceRanges(
-      List<Map<String, dynamic>> gallery) async {
-    final out = <String, String>{};
-    final ids = gallery
-        .map((g) => (g['provider_id'] ?? '').toString())
-        .where((id) => id.isNotEmpty)
-        .toSet()
-        .toList();
-    if (ids.isEmpty) return out;
-    try {
-      final rows = await Supabase.instance.client
-          .from('public_provider_profiles')
-          .select('id, price_range')
-          .inFilter('id', ids);
-      for (final raw in rows as List) {
-        final row = Map<String, dynamic>.from(raw as Map);
-        final id = (row['id'] ?? '').toString();
-        final range = ((row['price_range'] as String?) ?? '').trim();
-        if (id.isNotEmpty && range.isNotEmpty) out[id] = range;
-      }
-    } catch (_) {
-      // The trending rail's own rows still cover the providers it carries.
-    }
-    return out;
-  }
-
-  /// The trending rail's price ranges by provider id, used when the batched
-  /// read above could not answer (or when the provider is not in the view).
-  Map<String, String> get _priceRangeByProvider {
-    final out = <String, String>{};
-    for (final p in _galleryProviders) {
-      final id = (p['id'] ?? '').toString();
-      final range = ((p['price_range'] as String?) ?? '').trim();
-      if (id.isNotEmpty && range.isNotEmpty) out[id] = range;
-    }
-    return out;
   }
 
   /// One image per provider, in the priority the spec asks for:
@@ -739,10 +927,14 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
         likeCount: (j['like_count'] as num?)?.toInt() ?? 0,
         requiresAvailabilityConfirmation:
             j['requires_availability_confirmation'] ?? false,
+        city: (j['city'] as String?)?.trim(),
         createdAt: DateTime.parse(j['created_at']),
         updatedAt: DateTime.parse(j['updated_at']),
         images: imgs,
       );
+      // Discovery stays photo-first: a listing with no image is not shown on
+      // Home (the existing marketplace rule), while a photo whose URL fails to
+      // load still gets DashboardProductCard's placeholder.
     }).where((p) => p.hasPhoto).toList();
   }
 
@@ -787,6 +979,7 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
       onRefresh: _load,
       color: AppTheme.primaryGreen,
       child: CustomScrollView(
+        controller: _feedScroll,
         physics: const AlwaysScrollableScrollPhysics(),
         slivers: [
           SliverToBoxAdapter(child: _header()),
@@ -800,7 +993,7 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
           if (_activeRide != null)
             SliverToBoxAdapter(child: _rideBanner(_activeRide!)),
           SliverToBoxAdapter(child: _rankedCategoryRail()),
-          ..._productRail(),
+          ..._feedSlivers(),
           const SliverToBoxAdapter(child: SizedBox(height: 28)),
         ],
       ),
@@ -1496,128 +1689,308 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
 
   // ------------------------------------------------------------- products
 
-  /// Fresh Finds: every active listing the feed already holds, with no tab
-  /// scoping. The tabs are gone, and with them the rule that used to hide
-  /// half the feed behind a chip nobody knew to tap.
-  List<Widget> _productRail() {
-    final tiles = _freshFindTiles();
-    if (tiles.isEmpty) return const [];
-    const title = 'Fresh Finds';
+  /// The dashboard product section: title, channel-style category chips, and
+  /// a three-up sliver grid in the SAME CustomScrollView as the rest of Home.
+  /// Nothing here owns a vertical scroll view, so pull-to-refresh, the chip
+  /// rail and the grid scroll as one page.
+  List<Widget> _feedSlivers() {
+    final header = SliverToBoxAdapter(child: _feedHeader());
+
+    if (_feedInitialLoading) {
+      return [
+        header,
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+          sliver: SliverGrid(
+            gridDelegate: _feedGridDelegate,
+            delegate: SliverChildBuilderDelegate(
+              (_, __) => const SkeletonBox(
+                width: double.infinity,
+                height: 150,
+                borderRadius: 12,
+              ),
+              childCount: 6,
+            ),
+          ),
+        ),
+      ];
+    }
+
+    if (_feedError != null && _products.isEmpty) {
+      return [
+        header,
+        SliverToBoxAdapter(
+          child: _feedErrorView(_feedError!),
+        ),
+      ];
+    }
+
+    if (_products.isEmpty) {
+      return [
+        header,
+        SliverToBoxAdapter(child: _feedEmptyView()),
+      ];
+    }
+
     return [
-      SliverToBoxAdapter(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 22, 20, 4),
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(
-                  title,
-                  style: const TextStyle(
-                    fontSize: 16.5,
-                    fontWeight: FontWeight.w700,
-                    color: AppTheme.textPrimary,
-                  ),
-                ),
-              ),
-              GestureDetector(
-                onTap: () => context.push('/user/search'),
-                child: const Text(
-                  'See all',
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700,
-                    color: AppTheme.teal,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-      const SliverToBoxAdapter(child: SizedBox(height: 12)),
+      header,
+      // A refresh can fail while the previous page is still on screen. Keep
+      // the products, but show the retry instead of pretending the stale grid
+      // is current.
+      if (_feedError != null)
+        SliverToBoxAdapter(child: _feedErrorView(_feedError!)),
       SliverPadding(
-        padding: const EdgeInsets.symmetric(horizontal: 20),
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
         sliver: SliverGrid(
-          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 2,
-            mainAxisSpacing: 12,
-            crossAxisSpacing: 12,
-            // 0.66, not 0.72: the slot is tall enough that the image area
-            // comes out close to square, so a portrait product photo is
-            // cropped to a readable frame instead of a thin horizontal
-            // band — which is exactly what a "tiny cropped screenshot"
-            // looked like. Taller slot, same text block, so the card still
-            // cannot overflow.
-            childAspectRatio: 0.66,
+          gridDelegate: _feedGridDelegate,
+          delegate: SliverChildBuilderDelegate(
+            (context, i) {
+              final product = _products[i];
+              return DashboardProductCard(
+                product: product,
+                onTap: () => context.push('/user/product/${product.id}'),
+              );
+            },
+            childCount: _products.length,
           ),
-          delegate: SliverChildListDelegate(tiles),
         ),
       ),
+      SliverToBoxAdapter(child: _feedFooter()),
     ];
   }
 
-  /// Fresh Finds, with the published gallery photos mixed in.
-  ///
-  /// One gallery tile is interleaved after every three products, and the
-  /// remainder trails the grid, so the gallery reads as part of the same feed
-  /// rather than a second, separate list. The tiles are built as a list and
-  /// handed to `SliverChildListDelegate`, because the two card types do not
-  /// share a builder.
-  List<Widget> _freshFindTiles() {
-    final gallery = _galleryImages;
-    final tiles = <Widget>[];
-    var gi = 0;
-    for (var i = 0; i < _products.length; i++) {
-      final p = _products[i];
-      tiles.add(ProductCard(
-        product: p,
-        onTap: () => context.push('/user/product/${p.id}'),
-      ));
-      if ((i + 1) % 3 == 0 && gi < gallery.length) {
-        tiles.add(_galleryCard(gallery[gi]));
-        gi++;
-      }
-    }
-    while (gi < gallery.length) {
-      tiles.add(_galleryCard(gallery[gi]));
-      gi++;
-    }
-    return tiles;
+  static const SliverGridDelegateWithFixedCrossAxisCount _feedGridDelegate =
+      SliverGridDelegateWithFixedCrossAxisCount(
+    crossAxisCount: 3,
+    mainAxisSpacing: 10,
+    crossAxisSpacing: 8,
+    // The card's text block has a fixed intrinsic height and its image absorbs
+    // the rest. 0.58 gives a ~100dp tile a square-ish photo and enough room for
+    // name, provider, city and price without a BOTTOM OVERFLOWED stripe.
+    childAspectRatio: 0.58,
+  );
+
+  Widget _feedHeader() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(0, 22, 0, 0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            child: Row(
+              children: [
+                const Expanded(
+                  child: Text(
+                    'Fresh Finds',
+                    style: TextStyle(
+                      fontSize: 16.5,
+                      fontWeight: FontWeight.w700,
+                      color: AppTheme.textPrimary,
+                    ),
+                  ),
+                ),
+                GestureDetector(
+                  onTap: () => context.push('/user/search'),
+                  child: const Text(
+                    'See all',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      color: AppTheme.teal,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+          SizedBox(
+            height: 38,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              itemCount: _feedCategories.length + 1,
+              separatorBuilder: (_, __) => const SizedBox(width: 8),
+              itemBuilder: (_, i) {
+                if (i == 0) {
+                  return _feedChip(
+                    label: 'All products',
+                    selected: _feedCategoryId == null,
+                    onTap: () => _selectFeedCategory(null),
+                  );
+                }
+                final row = _feedCategories[i - 1];
+                final id = row['category_id']?.toString() ?? '';
+                final name = (row['name']?.toString() ?? '').trim();
+                if (id.isEmpty || name.isEmpty) return const SizedBox.shrink();
+                return _feedChip(
+                  label: name,
+                  selected: _feedCategoryId == id,
+                  onTap: () => _selectFeedCategory(id),
+                );
+              },
+            ),
+          ),
+        ],
+      );
+    );
   }
 
-  /// One published gallery photo in the Fresh Finds grid, as the SAME card the
-  /// products around it use.
-  ///
-  /// It used to be a bespoke tile: a photo, a provider name and a caption with
-  /// no price and nothing to tap but the photo. So a provider who uploaded a
-  /// photo into the feed had the one surface in the app where a buyer could
-  /// look but not act, while the product two tiles away could be bought. The
-  /// shared card carries the image, a price (their published range) and BOOK,
-  /// which opens their page — where their listings and their price are.
-  Widget _galleryCard(Map<String, dynamic> row) {
-    final providerId = (row['provider_id'] ?? '').toString();
-    // A photo with no provider behind it cannot be booked or opened, so it is
-    // dropped rather than rendered as a card whose button goes nowhere.
-    if (providerId.isEmpty) return const SizedBox.shrink();
-    final path = (row['storage_path'] as String?)?.trim() ?? '';
-    final name = (row['business_name'] as String?)?.trim() ?? '';
-    final city = (row['city'] as String?)?.trim() ?? '';
-    final caption = (row['caption'] as String?)?.trim() ?? '';
-    final url = path.isEmpty
-        ? null
-        : Supabase.instance.client.storage
-            .from('provider-gallery')
-            .getPublicUrl(path);
-    return ProductCard.provider(
-      providerId: providerId,
-      title: name.isEmpty ? 'Gallery' : name,
-      priceLabel: _galleryPrices[providerId] ??
-          _priceRangeByProvider[providerId] ??
-          '',
-      imageUrl: url,
-      caption: caption.isNotEmpty ? caption : city,
-      onTap: () => context.push('/user/provider/$providerId'),
+  Widget _feedChip({
+    required String label,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 140),
+        padding: const EdgeInsets.symmetric(horizontal: 14),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: selected
+              ? AppTheme.primaryGreen
+              : AppTheme.primaryGreen.withOpacity(0.07),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: selected
+                ? AppTheme.primaryGreen
+                : AppTheme.primaryGreen.withOpacity(0.22),
+          ),
+        ),
+        child: Text(
+          label,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            fontSize: 12.5,
+            fontWeight: FontWeight.w700,
+            color: selected ? Colors.white : AppTheme.textPrimary,
+          ),
+        ),
+      ),
     );
+  }
+
+  Widget _feedErrorView(String message) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 14, 20, 8),
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: AppTheme.surface,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: AppTheme.cardBorder),
+        ),
+        child: Column(
+          children: [
+            const Icon(Icons.cloud_off_outlined,
+                color: AppTheme.warning, size: 26),
+            const SizedBox(height: 8),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                  fontSize: 13, height: 1.4, color: AppTheme.textSecondary),
+            ),
+            const SizedBox(height: 8),
+            TextButton.icon(
+              onPressed: _reloadFeed,
+              icon: const Icon(Icons.refresh_rounded, size: 18),
+              label: const Text('Retry'),
+              style: TextButton.styleFrom(
+                  foregroundColor: AppTheme.primaryGreen),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _feedEmptyView() {
+    final scoped = _feedCategoryId != null;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 14, 20, 8),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 26),
+        decoration: BoxDecoration(
+          color: AppTheme.surface,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: AppTheme.cardBorder),
+        ),
+        child: Column(
+          children: [
+            Icon(
+              scoped
+                  ? Icons.inventory_2_outlined
+                  : Icons.storefront_outlined,
+              color: AppTheme.primaryGreen.withOpacity(0.65),
+              size: 34,
+            ),
+            const SizedBox(height: 10),
+            Text(
+              scoped
+                  ? 'No products in $_feedCategoryLabel yet'
+                  : 'No products available yet',
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                  color: AppTheme.textPrimary),
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              'Approved providers who publish a listing with a photo appear '
+              'here.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                  fontSize: 12, height: 1.4, color: AppTheme.textMuted),
+            ),
+            if (scoped) ...[
+              const SizedBox(height: 8),
+              TextButton(
+                onPressed: () => _selectFeedCategory(null),
+                style: TextButton.styleFrom(
+                    foregroundColor: AppTheme.teal),
+                child: const Text('SHOW ALL PRODUCTS'),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _feedFooter() {
+    if (_feedLoadingMore) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 18),
+        child: Center(
+          child: SizedBox(
+            width: 20,
+            height: 20,
+            child: CircularProgressIndicator(
+                strokeWidth: 2, color: AppTheme.primaryGreen),
+          ),
+        ),
+      );
+    }
+    if (!_feedHasMore && _feedError == null) {
+      return const Padding(
+        padding: EdgeInsets.fromLTRB(20, 16, 20, 6),
+        child: Center(
+          child: Text(
+            "You've seen everything",
+            style: TextStyle(
+                fontSize: 11.5,
+                fontStyle: FontStyle.italic,
+                color: AppTheme.textMuted),
+          ),
+        ),
+      );
+    }
+    return const SizedBox(height: 12);
   }
 
   // ------------------------------------------------------------ ride card
