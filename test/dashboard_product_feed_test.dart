@@ -1,6 +1,7 @@
-// The dashboard grid's contract: real category chips with Other last, a null
-// category for "All products", 24-row pages, a page-size+1 end signal, and a
-// server read that cannot return a hidden, deleted or provider-less listing.
+// The dashboard grid's contract: every main category as a chip with Other
+// last, a null category for "All products", 24-row pages, a page-size+1 end
+// signal, photo-optional cards with a placeholder, and a server read that
+// cannot return a hidden, deleted or provider-less listing.
 //
 // The grid itself is a widget over a network RPC, so the parts that can be
 // proven without a live database are the pure request/order rules and the SQL
@@ -175,17 +176,36 @@ void main() {
 
   group('the public feed SQL', () {
     final sql = File(
-      'supabase/migrations/20261111000001_dashboard_product_feed.sql',
+      'supabase/migrations/20261112000002_photo_optional_dashboard_and_full_category_chips.sql',
     ).readAsStringSync();
+    final feedBody = sql.substring(
+      sql.indexOf('CREATE OR REPLACE FUNCTION public.home_product_feed'),
+      sql.indexOf('COMMENT ON FUNCTION public.home_product_feed'),
+    );
+    final categoryBody = sql.substring(
+      sql.indexOf('CREATE OR REPLACE FUNCTION public.home_product_categories'),
+      sql.indexOf('COMMENT ON FUNCTION public.home_product_categories'),
+    );
 
-    test('filters hidden, unavailable, suspended, deleted and photo-less rows',
-        () {
-      expect(sql, contains('p.is_active = true'));
-      expect(sql, contains('p.is_available = true'));
-      expect(sql, contains("p.listing_status = 'ACTIVE'"));
-      expect(sql, contains("pp.status = 'APPROVED'"));
-      expect(sql, contains('pp.deleted_at IS NULL'));
-      expect(sql, contains('FROM public.product_images pi'));
+    test('keeps the public filters and does not require a photo', () {
+      expect(feedBody, contains('p.is_active = true'));
+      expect(feedBody, contains('p.is_available = true'));
+      expect(feedBody, contains("p.listing_status = 'ACTIVE'"));
+      expect(feedBody, contains("pp.status = 'APPROVED'"));
+      expect(feedBody, contains('pp.deleted_at IS NULL'));
+      expect(feedBody, isNot(contains('product_images')));
+    });
+
+    test('shows a photo-less listing through the existing card placeholder', () {
+      expect(
+        File('lib/core/widgets/dashboard_product_card.dart')
+            .readAsStringSync(),
+        contains('_ImageFallback'),
+      );
+      final home = File(
+        'lib/features/user/user_home_screen.dart',
+      ).readAsStringSync();
+      expect(home, isNot(contains('.where((p) => p.hasPhoto)')));
     });
 
     test('a failed image still has a card placeholder', () {
@@ -198,10 +218,29 @@ void main() {
 
     test('a category includes its descendants, and All products is unfiltered',
         () {
-      expect(sql, contains('WITH RECURSIVE subtree'));
-      expect(sql, contains('child.parent_id = parent.id'));
-      expect(sql, contains('p_category_id IS NULL'));
-      expect(sql, contains('p.category_id IN (SELECT id FROM subtree)'));
+      expect(feedBody, contains('WITH RECURSIVE subtree'));
+      expect(feedBody, contains('child.parent_id = parent.id'));
+      expect(feedBody, contains('p_category_id IS NULL'));
+      expect(feedBody, contains('p.category_id IN (SELECT id FROM subtree)'));
+    });
+
+    test('every main category is a chip even when its count is zero', () {
+      expect(categoryBody, contains('c.parent_id IS NULL'));
+      expect(categoryBody, contains('c.is_active = true'));
+      expect(
+        categoryBody,
+        contains("lower(btrim(c.name)) IN ('other', 'other services')"),
+      );
+      expect(categoryBody, isNot(contains('product_images')));
+    });
+
+    test('an empty category is a friendly message, not an error', () {
+      final home = File(
+        'lib/features/user/user_home_screen.dart',
+      ).readAsStringSync();
+      expect(home, contains("'No products here yet'"));
+      expect(home, contains('Nothing has been listed in'));
+      expect(home, isNot(contains('with a photo')));
     });
 
     test('paging is server-side and bounded', () {
@@ -220,7 +259,8 @@ void main() {
       );
       expect(sql, contains('TO anon, authenticated, service_role'));
       expect(sql, contains('SECURITY DEFINER'));
-      expect(sql, contains("provider_profiles pp ON pp.id = p.provider_id"));
+      expect(feedBody,
+          contains('provider_profiles pp ON pp.id = p.provider_id'));
     });
   });
 }
