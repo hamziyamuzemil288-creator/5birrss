@@ -385,6 +385,13 @@ jobs:
         if: ${{ !inputs.dry_run }}
         run: supabase functions deploy fcm-dispatch
 
+      # "Send me a test notification" on the Notification Settings screen.
+      # It verifies the caller's own JWT, then writes ONE notification for
+      # that caller, which is what exercises the real inbox + FCM chain.
+      - name: Deploy function notification-test
+        if: ${{ !inputs.dry_run }}
+        run: supabase functions deploy notification-test
+
       - name: Set Supabase function secrets
         if: ${{ !inputs.dry_run }}
         run: |

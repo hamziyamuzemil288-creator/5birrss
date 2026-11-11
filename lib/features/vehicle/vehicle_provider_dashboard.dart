@@ -12,6 +12,7 @@ import '../../core/services/points_service.dart';
 import '../../core/services/rank_service.dart';
 import '../../core/utils/friendly_error.dart';
 import '../../core/widgets/load_error_view.dart';
+import '../../core/widgets/notification_permission_prompt.dart';
 import '../../core/widgets/rank_badge.dart';
 import '../../core/widgets/dashboard_top_tabs.dart';
 import '../../core/widgets/quick_action_pill.dart';
@@ -47,6 +48,16 @@ class _VehicleProviderDashboardState
     // so re-check on resume rather than making them toggle again.
     WidgetsBinding.instance.addObserver(this);
     _load();
+    // A driver's useful alerts are "a delivery job is assigned" and "the
+    // customer is at the pickup". Ask once, here, not at app launch.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        NotificationPermissionPrompt.maybeAsk(
+          context,
+          reason: 'A delivery job or ride request can arrive while you drive.',
+        );
+      }
+    });
   }
 
   Future<void> _load() async {

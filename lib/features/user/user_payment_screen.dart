@@ -18,6 +18,7 @@ import '../../core/utils/order_number_format.dart' as onf;
 import '../../core/widgets/admin_payment_details_card.dart';
 import '../../core/widgets/availability_notice.dart';
 import '../../core/widgets/birr_text_field.dart';
+import '../../core/widgets/notification_permission_prompt.dart';
 import '../../core/widgets/primary_button.dart';
 
 /// What the checkout screen hands to the payment screen.
@@ -447,6 +448,15 @@ class _UserPaymentScreenState extends ConsumerState<UserPaymentScreen> {
           'Attach the payment screenshot so the administrator can approve your order.');
       return;
     }
+
+    // The order is about to be placed: this is the first moment a notification
+    // has something useful to say (approval, driver assigned, on the way).
+    // Asked here, not at launch, and only once per app run.
+    await NotificationPermissionPrompt.maybeAsk(
+      context,
+      reason: 'You are placing an order.',
+    );
+    if (!mounted) return;
 
     await _refreshProviderReadiness();
     if (mounted) setState(() {});

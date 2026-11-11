@@ -54,10 +54,22 @@ const FIREBASE_SERVICE_ACCOUNT = Deno.env.get("FIREBASE_SERVICE_ACCOUNT")!;
 const FIREBASE_PROJECT_ID = Deno.env.get("FIREBASE_PROJECT_ID")!;
 const DISPATCH_SECRET = Deno.env.get("NOTIFICATION_DISPATCH_SECRET")!;
 
-// The channel the client creates (see notification_service.dart). Naming it
-// here means a pushed notification is posted to the same high-importance
-// channel the app controls, rather than an unnamed default.
-const ANDROID_CHANNEL = "aliob_updates";
+// The channels the client creates (see notification_service.dart). The
+// database trigger now puts the right one in the event payload; this set is a
+// validation guard, so a typo or an unexpected event can only fall back to the
+// general channel rather than asking Android for a channel that does not
+// exist (which drops the notification silently).
+const ANDROID_CHANNELS = new Set([
+  "aliob_orders",
+  "aliob_rides",
+  "aliob_payments",
+  "aliob_account",
+  "aliob_messages",
+  "aliob_promotions",
+]);
+const DEFAULT_ANDROID_CHANNEL = "aliob_messages";
+const SMALL_ICON = "ic_stat_aliob";
+const BRAND_COLOR = "#1B5E20";
 
 const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
 
@@ -135,6 +147,20 @@ async function sendToOne(
     data[k] = typeof v === "string" ? v : JSON.stringify(v);
   }
 
+  const requestedChannel = String(payload.android_channel ?? "");
+  const channel = ANDROID_CHANNELS.has(requestedChannel)
+    ? requestedChannel
+    : DEFAULT_ANDROID_CHANNEL;
+
+  // The OS draws the tray notification, but a tap (and a foreground local
+  // notification) needs the delivery metadata too. Put it in `data`, where Dart
+  // can read it in every app state.
+  data.type = String(payload.type ?? data.type ?? "");
+  data.event = String(data.event ?? "");
+  data.android_channel = channel;
+  data.recipient_role = String(payload.recipient_role ?? "buyer");
+  data.notification_id = String(payload.notification_id ?? "");
+
   const body: Record<string, unknown> = {
     message: {
       token,
@@ -144,7 +170,18 @@ async function sendToOne(
       },
       android: {
         priority: "high",
-        notification: { channel_id: ANDROID_CHANNEL },
+        notification: {
+          channel_id: channel,
+          // A monochrome pin, not the launcher mipmap: Android masks the
+          // small icon to a white silhouette, and a colour launcher icon
+          // renders as a blank square.
+          icon: SMALL_ICON,
+          color: BRAND_COLOR,
+          notification_priority: "PRIORITY_HIGH",
+          default_sound: true,
+          default_vibrate_timings: true,
+          visibility: "PUBLIC",
+        },
       },
     },
   };
@@ -170,8 +207,11 @@ async function sendToOne(
   try {
     const err = await res.json();
     const detail = err?.error?.details?.[0];
-    return (detail?.errorCode ?? err?.error?.status ?? `HTTP_${res.status}`) as string;
+    const code = (detail?.errorCode ?? err?.error?.status ?? `HTTP_${res.status}`) as string;
+    console.error(`fcm-dispatch: send failed for ${token.slice(0, 10)}…: ${code}`);
+    return code;
   } catch {
+    console.error(`fcm-dispatch: send failed for ${token.slice(0, 10)}…: HTTP_${res.status}`);
     return `HTTP_${res.status}`;
   }
 }
@@ -301,12 +341,14 @@ Deno.serve(async (req) => {
   // ---- Fan out, reaping dead tokens ---------------------------------------
   let sent = 0;
   const dead: string[] = [];
+  const failures: string[] = [];
   for (const token of tokens) {
     const code = await sendToOne(accessToken, token, payload);
     if (code === null) {
       sent++;
-    } else if (DEAD_TOKEN_CODES.has(code)) {
-      dead.push(token);
+    } else {
+      failures.push(code);
+      if (DEAD_TOKEN_CODES.has(code)) dead.push(token);
     }
     // Transient errors (UNAVAILABLE, INTERNAL, QUOTA_*) are left alone: the
     // token stays active and the notification remains in the in-app inbox.
@@ -318,5 +360,32 @@ Deno.serve(async (req) => {
     await admin.from("fcm_tokens").update({ is_active: false }).in("token", dead);
   }
 
-  return json({ ok: true, sent, reaped: dead.length, total: tokens.length });
+  // The row was claimed as SENT before the network sends so a retried webhook
+  // cannot duplicate a push. Now that the sends are known, record the truth:
+  // an event that reached nobody and failed for every token must be FAILED
+  // with the FCM codes, not a green SENT row that hides the outage.
+  const allFailed = sent === 0 && failures.length > 0;
+  const errorSummary = failures.length > 0
+    ? `sent=${sent} failed=${failures.length} codes=${[...new Set(failures)].join(",")}`
+    : null;
+  if (errorSummary) {
+    console.error(`fcm-dispatch: event ${eventId}: ${errorSummary}`);
+  }
+  await admin
+    .from("n8n_events")
+    .update({
+      status: allFailed ? "FAILED" : "SENT",
+      attempts: Number(record.attempts ?? 0) + 1,
+      last_error: errorSummary,
+      processed_at: new Date().toISOString(),
+    })
+    .eq("id", eventId);
+
+  return json({
+    ok: !allFailed,
+    sent,
+    reaped: dead.length,
+    total: tokens.length,
+    failed: failures.length,
+  }, allFailed ? 502 : 200);
 });
