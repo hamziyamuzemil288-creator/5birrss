@@ -392,6 +392,14 @@ jobs:
         if: ${{ !inputs.dry_run }}
         run: supabase functions deploy notification-test
 
+      # The sign-in welcome. It verifies the caller's own JWT, then calls a
+      # service-role SQL function so the inbox row and FCM push are immediate
+      # instead of waiting for the notification outbox drain. Deploy AFTER the
+      # 20261112000001 migration that creates that SQL function.
+      - name: Deploy function signin-welcome
+        if: ${{ !inputs.dry_run }}
+        run: supabase functions deploy signin-welcome
+
       - name: Set Supabase function secrets
         if: ${{ !inputs.dry_run }}
         run: |

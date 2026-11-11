@@ -29,6 +29,7 @@ void main() {
         'aliob_payments',
       );
       expect(notificationChannelIdFor('SECURITY', {}), 'aliob_account');
+      expect(notificationChannelIdFor('WELCOME_BACK', {}), 'aliob_account');
     });
 
     test('a valid server channel wins, and an unknown one falls back safely',

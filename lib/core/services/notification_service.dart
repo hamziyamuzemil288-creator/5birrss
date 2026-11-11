@@ -151,6 +151,7 @@ String notificationChannelIdFor(
     'correction_required',
     'registration_received',
     'provider_inactive',
+    'welcome_back',
   }.contains(kind)) {
     return kAliobAccountChannel.id;
   }
@@ -461,16 +462,57 @@ class NotificationService {
   Future<void> registerToken() async {
     if (!_firebaseReady) return;
     try {
-      final token = await FirebaseMessaging.instance.getToken();
-      if (token == null || token.isEmpty) return;
-      _token = token;
-      await _upsertToken(token);
-      // Broadcast topic: lets an admin announcement target every device in one
-      // send. Best-effort — a topic failure must not block sign-in.
-      await FirebaseMessaging.instance.subscribeToTopic('all_users');
+      await _registerCurrentToken();
     } catch (e) {
       debugPrint('NotificationService: registerToken failed: $e');
     }
+  }
+
+  /// Make this device addressable before a sign-in welcome is requested.
+  ///
+  /// The welcome function refuses to consume its once-per-session key when
+  /// push is on but the account has no token: writing the inbox row then would
+  /// be the exact "in the inbox, never in the tray" failure the notification
+  /// brief warns about. This method gives FCM a short, bounded chance to
+  /// produce a token first.
+  ///
+  /// It asks for the Android 13+ permission only when the OS has never been
+  /// asked (`notDetermined`). A refusal is remembered by the OS and is never
+  /// re-prompted here; the inbox fallback still runs. Safe to call more than
+  /// once, and never throws.
+  Future<bool> prepareForSignIn() async {
+    try {
+      await initialize();
+      if (!_firebaseReady) return false;
+
+      final settings = await FirebaseMessaging.instance.getNotificationSettings();
+      if (settings.authorizationStatus == AuthorizationStatus.notDetermined) {
+        await requestPermission();
+      }
+
+      for (var attempt = 0; attempt < 3; attempt++) {
+        if (await _registerCurrentToken()) return true;
+        if (attempt < 2) {
+          await Future<void>.delayed(
+            Duration(milliseconds: 500 * (attempt + 1)),
+          );
+        }
+      }
+    } catch (e) {
+      debugPrint('NotificationService: prepareForSignIn failed: $e');
+    }
+    return false;
+  }
+
+  Future<bool> _registerCurrentToken() async {
+    final token = await FirebaseMessaging.instance.getToken();
+    if (token == null || token.isEmpty) return false;
+    _token = token;
+    await _upsertToken(token);
+    // Broadcast topic: lets an admin announcement target every device in one
+    // send. Best-effort — a topic failure must not block sign-in.
+    await FirebaseMessaging.instance.subscribeToTopic('all_users');
+    return true;
   }
 
   /// Sign-out / dead-session cleanup: delete this device's `fcm_tokens` row (so

@@ -2235,6 +2235,64 @@ void main() {
       print('    approval welcome -> $detail');
     });
 
+    test('the dashboard product feed is public, filtered and paged', () async {
+      // The grid depends on two RPCs that a deploy must actually create. The
+      // static tests pin the source; this pins the live database after deploy,
+      // including the anon grant a guest needs.
+      final (detail, error) =
+          await rpcTextDiagnosed('assert_home_product_feed_is_public');
+      expect(detail, isNotNull,
+          reason: 'assert_home_product_feed_is_public() could not run, so '
+              'nothing verified the dashboard feed on the live database. '
+              'Diagnostic: $error');
+      expect(detail, isNot(startsWith('FAIL')),
+          reason: 'The dashboard feed is not fully public or filtered: $detail');
+      // ignore: avoid_print
+      print('    dashboard feed -> $detail');
+    });
+
+    test('a guest can read the dashboard feed and its category chips', () async {
+      // The SQL assertion above reads definitions. This calls the two RPCs as
+      // anon, which is the actual guest path: provider_profiles is not readable
+      // by anon, so a SECURITY DEFINER mistake or a missing GRANT fails here
+      // even though the source still looks right.
+      try {
+        final feed = await client.rpc('home_product_feed', params: {
+          'p_category_id': null,
+          'p_limit': 25,
+          'p_offset': 0,
+          'p_city': null,
+        });
+        final chips = await client.rpc('home_product_categories', params: {
+          'p_city': null,
+        });
+        expect(feed, isA<List>(), reason: 'the guest feed is not a list');
+        expect(chips, isA<List>(), reason: 'the guest chip rail is not a list');
+        // ignore: avoid_print
+        print('    guest feed -> ${(feed as List).length} products, '
+            '${(chips as List).length} chips');
+      } catch (e) {
+        if (await _tolerate('home_product_feed', e)) return;
+        rethrow;
+      }
+    });
+
+    test('the sign-in welcome is wired once per session', () async {
+      // The client can only call the RPC on an explicit signedIn event, but
+      // that client rule is worthless if the database half is absent or lost
+      // its session key in a later restatement. This checks the enum, the
+      // receipt table, the five-minute gap, the token wait and the grants.
+      final (detail, error) =
+          await rpcTextDiagnosed('assert_signin_welcome_is_wired');
+      expect(detail, isNotNull,
+          reason: 'assert_signin_welcome_is_wired() could not run, so nothing '
+              'verified the welcome-back path. Diagnostic: $error');
+      expect(detail, isNot(startsWith('FAIL')),
+          reason: 'The welcome-back notification is not fully wired: $detail');
+      // ignore: avoid_print
+      print('    sign-in welcome -> $detail');
+    });
+
     test('both sides of an order and a ride are told what happened', () async {
       // The both-parties requirement. Before this, the provider was told
       // nothing when an order payment was verified, and the rider's messages
