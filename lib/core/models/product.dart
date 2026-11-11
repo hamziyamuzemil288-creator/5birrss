@@ -46,6 +46,11 @@ class Product {
   final bool requiresAvailabilityConfirmation;
 
   final Map<String, dynamic>? metadata;
+
+  /// The browse city this listing was filed under. Optional because older
+  /// rows predate multi-city support; the dashboard card simply omits the
+  /// line when it is empty.
+  final String? city;
   final DateTime createdAt;
   final DateTime updatedAt;
   final List<ListingImage> images;
@@ -74,6 +79,7 @@ class Product {
     this.likeCount = 0,
     this.requiresAvailabilityConfirmation = false,
     this.metadata,
+    this.city,
     required this.createdAt,
     required this.updatedAt,
     this.images = const [],
@@ -109,6 +115,7 @@ class Product {
       // old database must behave exactly as it did before this field existed.
       requiresAvailabilityConfirmation:
           (json['requires_availability_confirmation'] as bool?) ?? false,
+      city: (json['city'] as String?)?.trim(),
       createdAt: DateTime.parse(json['created_at'] as String),
       updatedAt: DateTime.parse(json['updated_at'] as String),
     );

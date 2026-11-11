@@ -47,6 +47,19 @@
                 <data android:scheme="io.supabase.com.amistbirr.myapp"/>
             </intent-filter>
         </activity>
+        <!-- FCM uses these when a push does not name its own channel/icon.
+             The server always names one (aliob_orders, aliob_rides, …), but
+             the defaults keep an older build or an admin topic push from
+             landing in an unnamed channel or drawing a blank square. -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="aliob_messages" />
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@drawable/ic_stat_aliob" />
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_color"
+            android:resource="@color/aliob_brand_green" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

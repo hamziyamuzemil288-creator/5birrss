@@ -11,6 +11,7 @@ import '../../core/services/rank_service.dart';
 import '../../core/services/resilient_subscription.dart';
 import '../../core/utils/friendly_error.dart';
 import '../../core/widgets/load_error_view.dart';
+import '../../core/widgets/notification_permission_prompt.dart';
 import '../../core/widgets/product_card.dart' show listingCoverUrl;
 import '../../core/widgets/publish_readiness_banner.dart';
 import '../../core/widgets/rank_badge.dart';
@@ -78,6 +79,16 @@ class _ServiceProviderDashboardState
   void initState() {
     super.initState();
     _load();
+    // A provider's day is new orders and availability requests. Ask once, on
+    // the screen where that reason is obvious, not as a launch-time wall.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        NotificationPermissionPrompt.maybeAsk(
+          context,
+          reason: 'A customer order or availability request needs your reply.',
+        );
+      }
+    });
   }
 
   Future<void> _load() async {

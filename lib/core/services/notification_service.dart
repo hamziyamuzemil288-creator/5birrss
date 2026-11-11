@@ -4,6 +4,8 @@ import 'dart:convert';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart' show Color;
+import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -25,17 +27,177 @@ import '../config/env.dart';
 @pragma('vm:entry-point')
 Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {}
 
-/// The one Android channel every Aliob push is posted to. Created once on the
-/// client; the sender edge function references the same id so a push is never
-/// dropped into an unnamed default channel (which users can silence
-/// independently and which looks unfinished).
-const AndroidNotificationChannel kAliobNotificationChannel =
-    AndroidNotificationChannel(
-  'aliob_updates',
-  'Aliob updates',
-  description: 'Orders, rides, payments and account updates.',
+/// The Android channels this app owns.
+///
+/// One channel for everything was the original bug: Android 8+ gives each
+/// channel its own importance and sound settings, so putting orders, rides,
+/// promotions and security into one channel meant a user could not silence
+/// promotions without also silencing a delivery arriving. These ids are also
+/// written into the `n8n_events` payload by
+/// `20261111000002_notification_delivery_hardening.sql`, and fcm-dispatch
+/// posts to the same id, so the server and the client never disagree.
+const AndroidNotificationChannel kAliobOrderChannel = AndroidNotificationChannel(
+  'aliob_orders',
+  'Orders and checkout',
+  description: 'Order updates, checkout approval and delivery decisions.',
   importance: Importance.high,
+  playSound: true,
+  enableVibration: true,
 );
+
+const AndroidNotificationChannel kAliobRideChannel = AndroidNotificationChannel(
+  'aliob_rides',
+  'Rides and delivery',
+  description: 'Ride requests, driver assignment and delivery progress.',
+  importance: Importance.high,
+  playSound: true,
+  enableVibration: true,
+);
+
+const AndroidNotificationChannel kAliobPaymentChannel =
+    AndroidNotificationChannel(
+  'aliob_payments',
+  'Payments and wallet',
+  description: 'Payment verification, wallet credit and subscription charges.',
+  importance: Importance.high,
+  playSound: true,
+  enableVibration: true,
+);
+
+const AndroidNotificationChannel kAliobAccountChannel =
+    AndroidNotificationChannel(
+  'aliob_account',
+  'Account and security',
+  description: 'Account decisions, security notices and profile changes.',
+  importance: Importance.high,
+  playSound: true,
+  enableVibration: true,
+);
+
+const AndroidNotificationChannel kAliobMessageChannel =
+    AndroidNotificationChannel(
+  'aliob_messages',
+  'General updates',
+  description: 'Messages from Aliob that are not an order or a payment.',
+  importance: Importance.defaultImportance,
+  playSound: true,
+  enableVibration: true,
+);
+
+const AndroidNotificationChannel kAliobPromotionChannel =
+    AndroidNotificationChannel(
+  'aliob_promotions',
+  'Promotions',
+  description: 'Offers and announcements. Quiet by default.',
+  importance: Importance.low,
+  playSound: false,
+  enableVibration: false,
+);
+
+const List<AndroidNotificationChannel> kAliobNotificationChannels = [
+  kAliobOrderChannel,
+  kAliobRideChannel,
+  kAliobPaymentChannel,
+  kAliobAccountChannel,
+  kAliobMessageChannel,
+  kAliobPromotionChannel,
+];
+
+/// The channel a notification belongs to.
+///
+/// The server writes `android_channel` into the FCM data payload; when Dart is
+/// running we still recompute from `type`/`event` so a foreground local
+/// notification has the same channel as the background one. The order of the
+/// tests matters: `delivery_assigned` is a ride/delivery event even though its
+/// notification type is an ORDER type.
+String notificationChannelIdFor(
+  String? type,
+  Map<String, dynamic> data,
+) {
+  final supplied = '${data['android_channel'] ?? ''}'.trim();
+  if (kAliobNotificationChannels.any((c) => c.id == supplied)) return supplied;
+
+  final event = '${data['event'] ?? ''}'.trim().toLowerCase();
+  final kind = '${type ?? data['type'] ?? ''}'.trim().toLowerCase();
+
+  if (const {
+    'delivery_assigned',
+    'driver_assigned',
+    'driver_arriving',
+    'driver_arrived',
+    'delivery_started',
+    'delivery_completed',
+  }.contains(event)) {
+    return kAliobRideChannel.id;
+  }
+  if (kind.contains('ride') || event.contains('ride')) {
+    return kAliobRideChannel.id;
+  }
+  if (kind.contains('order') ||
+      event.startsWith('checkout') ||
+      event.contains('delivery')) {
+    return kAliobOrderChannel.id;
+  }
+  if (kind.contains('payment') ||
+      kind.contains('wallet') ||
+      kind.contains('subscription') ||
+      kind.contains('transaction')) {
+    return kAliobPaymentChannel.id;
+  }
+  if (const {
+    'security',
+    'approval',
+    'rejection',
+    'correction_required',
+    'registration_received',
+    'provider_inactive',
+  }.contains(kind)) {
+    return kAliobAccountChannel.id;
+  }
+  if (const {'promotion', 'promo', 'marketing', 'app_update'}.contains(event)) {
+    return kAliobPromotionChannel.id;
+  }
+  return kAliobMessageChannel.id;
+}
+
+AndroidNotificationChannel notificationChannelFor(
+  String? type,
+  Map<String, dynamic> data,
+) {
+  final id = notificationChannelIdFor(type, data);
+  return kAliobNotificationChannels.firstWhere(
+    (channel) => channel.id == id,
+    orElse: () => kAliobMessageChannel,
+  );
+}
+
+/// Android 13+ permission state, plus whether this build can push at all and
+/// whether this device has a registration token.
+class NotificationReadiness {
+  const NotificationReadiness({
+    required this.firebaseConfigured,
+    required this.localReady,
+    required this.permission,
+    required this.notificationsEnabled,
+    required this.hasToken,
+    this.authorizationStatus,
+  });
+
+  final bool firebaseConfigured;
+  final bool localReady;
+  final bool permission;
+  final bool notificationsEnabled;
+  final bool hasToken;
+  final AuthorizationStatus? authorizationStatus;
+
+  /// Asked but refused, or switched off in system settings.
+  bool get denied =>
+      authorizationStatus == AuthorizationStatus.denied ||
+      (firebaseConfigured && !notificationsEnabled);
+
+  bool get ready =>
+      firebaseConfigured && permission && notificationsEnabled && hasToken;
+}
 
 /// Client half of push notifications: Firebase Cloud Messaging transport only.
 ///
@@ -43,15 +205,14 @@ const AndroidNotificationChannel kAliobNotificationChannel =
 ///
 /// There is NO Firestore and NO Cloud Function here. Firebase is used purely
 /// as the delivery pipe. Every notification this app produces is already
-/// written to the `notifications` table by the server (see
-/// `20261015000001_every_notification_also_leaves_as_a_push.sql`); the server
-/// then fans a push out over FCM via an Edge Function. This class is only the
-/// device side of that pipe:
+/// written to the `notifications` table by the server; the server then fans a
+/// push out over FCM via an Edge Function. This class is only the device side
+/// of that pipe:
 ///
 ///   * obtain and PERSIST the device token into `fcm_tokens` (which the sender
 ///     reads), refresh it when FCM rotates it, and remove it on sign-out;
-///   * ask for the Android 13+ notification permission;
-///   * create the shared notification channel;
+///   * create the Android channels and the monochrome small icon;
+///   * ask for the Android 13+ permission when the caller has a reason to;
 ///   * display a foreground push (background/killed pushes are shown by the OS)
 ///     and turn a tap — foreground, background, or cold-start — into the same
 ///     deep link the in-app inbox uses.
@@ -61,18 +222,20 @@ const AndroidNotificationChannel kAliobNotificationChannel =
 /// Firebase is initialized with EXPLICIT `FirebaseOptions` from `--dart-define`
 /// (`Env.firebaseConfigured`), never from a google-services.json. If those
 /// values are absent, `initialize()` returns early and push stays off — the app
-/// builds and runs exactly as before. This is why the project carries no
-/// google-services Gradle plugin: a build before the Firebase config exists
-/// must still succeed.
+/// builds and runs exactly as before.
 class NotificationService {
   NotificationService._();
   static final NotificationService instance = NotificationService._();
 
+  static const MethodChannel _settingsChannel =
+      MethodChannel('aliob/notifications');
+
   final FlutterLocalNotificationsPlugin _local =
       FlutterLocalNotificationsPlugin();
 
-  bool _initialized = false;
-  bool get isInitialized => _initialized;
+  bool _localReady = false;
+  bool _firebaseReady = false;
+  bool get isInitialized => _firebaseReady;
 
   /// The last token this device registered, kept so sign-out can delete the
   /// matching `fcm_tokens` row without a second round trip to fetch it.
@@ -98,12 +261,18 @@ class NotificationService {
     }
   }
 
-  /// Bring up Firebase, the channel, the permission prompt and the handlers.
-  /// Safe to call more than once; a no-op when Firebase is not configured.
-  /// Never throws: push is an enhancement, and a failure here must not stop the
-  /// app from starting.
+  /// Bring up the channels, Firebase and the handlers. Safe to call more than
+  /// once; a no-op when Firebase is not configured. Never throws: push is an
+  /// enhancement, and a failure here must not stop the app from starting.
+  ///
+  /// It deliberately does NOT ask for permission. The Android 13 prompt is
+  /// requested at the moment the user does something that needs it (first
+  /// order, provider/driver sign-in, or the test button), with an explanation
+  /// first. A launch-time wall is the pattern users reflexively deny.
   Future<void> initialize() async {
-    if (_initialized) return;
+    if (_localReady && _firebaseReady) return;
+
+    await _initializeLocalNotifications();
     if (!Env.firebaseConfigured) {
       debugPrint(
           'NotificationService: Firebase not configured via --dart-define; push stays off.');
@@ -124,77 +293,16 @@ class NotificationService {
       return;
     }
 
-    // Register the background entry point now that Firebase exists.
+    _firebaseReady = true;
+
+    // Register the background entry point now that Firebase exists. Background
+    // and killed notification-payload pushes are drawn by the OS; this handler
+    // is the defined entry point for a future data-only message.
     FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
 
-    // Channel + foreground-tap routing. A local-notifications failure only
-    // means we cannot DRAW a foreground push ourselves; the OS still shows
-    // background/killed pushes and taps still deep-link.
-    try {
-      const settings = InitializationSettings(
-        android: AndroidInitializationSettings('@mipmap/ic_launcher'),
-        iOS: DarwinInitializationSettings(),
-      );
-      await _local.initialize(
-        settings,
-        onDidReceiveNotificationResponse: (response) {
-          final payload = response.payload;
-          if (payload == null) return;
-          try {
-            _openFromData(
-                Map<String, dynamic>.from(jsonDecode(payload) as Map));
-          } catch (_) {}
-        },
-      );
-      await _local
-          .resolvePlatformSpecificImplementation<
-              AndroidFlutterLocalNotificationsPlugin>()
-          ?.createNotificationChannel(kAliobNotificationChannel);
-    } catch (e) {
-      debugPrint('NotificationService: local-notification setup failed: $e');
-    }
-
-    _initialized = true;
-
-    // Android 13+ runtime permission (and iOS prompt). Best-effort: a decline
-    // leaves in-app notifications working, push simply does not appear.
-    try {
-      await FirebaseMessaging.instance.requestPermission();
-    } catch (e) {
-      debugPrint('NotificationService: requestPermission failed: $e');
-    }
-
     // FOREGROUND: the OS does not draw these, so show them ourselves on the
-    // shared channel, carrying the data payload for the tap deep link.
-    FirebaseMessaging.onMessage.listen((message) async {
-      final notification = message.notification;
-      if (notification == null) return;
-      try {
-        await _local.show(
-          message.hashCode,
-          notification.title ?? 'Aliob',
-          notification.body ?? '',
-          // Not `const`: reading `.id`/`.name` off the const channel is not a
-          // constant expression, and re-spelling the strings here would let
-          // the channel this push is posted to drift from the one the client
-          // creates. The channel const stays the single source of truth.
-          NotificationDetails(
-            android: AndroidNotificationDetails(
-              kAliobNotificationChannel.id,
-              kAliobNotificationChannel.name,
-              channelDescription: kAliobNotificationChannel.description,
-              importance: Importance.high,
-              priority: Priority.high,
-              icon: '@mipmap/ic_launcher',
-            ),
-            iOS: DarwinNotificationDetails(),
-          ),
-          payload: jsonEncode(message.data),
-        );
-      } catch (e) {
-        debugPrint('NotificationService: foreground show failed: $e');
-      }
-    });
+    // channel carried by the payload.
+    FirebaseMessaging.onMessage.listen(_showForeground);
 
     // BACKGROUND tap (app alive in the tray, user opens it from the push).
     FirebaseMessaging.onMessageOpenedApp
@@ -214,17 +322,144 @@ class NotificationService {
       if (initial != null) _openFromData(_asDataMap(initial.data));
     } catch (_) {}
 
-    // If a user is already signed in when the app starts, register at once.
-    if (Supabase.instance.client.auth.currentUser != null) {
+    // If a user — including an anonymous guest buyer — is already signed in
+    // when the app starts, register at once.
+    if (Supabase.instance.client.auth.currentSession != null) {
       unawaited(registerToken());
     }
   }
 
+  Future<void> _initializeLocalNotifications() async {
+    if (_localReady) return;
+    try {
+      const settings = InitializationSettings(
+        android: AndroidInitializationSettings('ic_stat_aliob'),
+        iOS: DarwinInitializationSettings(),
+      );
+      await _local.initialize(
+        settings,
+        onDidReceiveNotificationResponse: (response) {
+          final payload = response.payload;
+          if (payload == null) return;
+          try {
+            _openFromData(
+                Map<String, dynamic>.from(jsonDecode(payload) as Map));
+          } catch (_) {}
+        },
+      );
+      final android = _local.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+      for (final channel in kAliobNotificationChannels) {
+        await android?.createNotificationChannel(channel);
+      }
+      _localReady = true;
+    } catch (e) {
+      debugPrint('NotificationService: local-notification setup failed: $e');
+    }
+  }
+
+  /// Ask for permission only when the caller has a reason. Returns true when
+  /// notifications are allowed afterwards.
+  Future<bool> requestPermission() async {
+    if (!_firebaseReady) return false;
+    try {
+      final settings = await FirebaseMessaging.instance.requestPermission(
+        alert: true,
+        badge: true,
+        sound: true,
+      );
+      return settings.authorizationStatus == AuthorizationStatus.authorized ||
+          settings.authorizationStatus == AuthorizationStatus.provisional;
+    } catch (e) {
+      debugPrint('NotificationService: requestPermission failed: $e');
+      return false;
+    }
+  }
+
+  /// What is blocking delivery, if anything, for the settings screen.
+  Future<NotificationReadiness> readiness() async {
+    if (!_localReady) await _initializeLocalNotifications();
+
+    bool enabled = false;
+    try {
+      enabled = await _local
+              .resolvePlatformSpecificImplementation<
+                  AndroidFlutterLocalNotificationsPlugin>()
+              ?.areNotificationsEnabled() ??
+          false;
+    } catch (_) {
+      enabled = false;
+    }
+
+    if (!_firebaseReady) {
+      return NotificationReadiness(
+        firebaseConfigured: Env.firebaseConfigured,
+        localReady: _localReady,
+        permission: false,
+        notificationsEnabled: enabled,
+        hasToken: false,
+      );
+    }
+
+    AuthorizationStatus? status;
+    bool permission = false;
+    try {
+      final settings = await FirebaseMessaging.instance.getNotificationSettings();
+      status = settings.authorizationStatus;
+      permission = status == AuthorizationStatus.authorized ||
+          status == AuthorizationStatus.provisional;
+    } catch (_) {
+      permission = false;
+    }
+
+    String? token;
+    try {
+      token = await FirebaseMessaging.instance.getToken();
+    } catch (_) {
+      token = null;
+    }
+    _token = token ?? _token;
+
+    return NotificationReadiness(
+      firebaseConfigured: true,
+      localReady: _localReady,
+      permission: permission,
+      notificationsEnabled: enabled,
+      hasToken: token != null && token.isNotEmpty,
+      authorizationStatus: status,
+    );
+  }
+
+  /// The system notification/app settings screen. Android-only method supplied
+  /// by MainActivity, so no extra permission plugin is required.
+  Future<void> openSystemSettings() async {
+    if (defaultTargetPlatform != TargetPlatform.android) return;
+    try {
+      await _settingsChannel.invokeMethod<void>('openNotificationSettings');
+    } catch (e) {
+      debugPrint('NotificationService: openSystemSettings failed: $e');
+    }
+  }
+
+  /// One real notification for THIS user: the inbox row and the FCM push are
+  /// produced by the same server path as every other notification.
+  Future<Map<String, dynamic>> sendTestNotification() async {
+    final response = await Supabase.instance.client.functions
+        .invoke('notification-test', body: const {});
+    final data = response.data;
+    if (data is Map) return Map<String, dynamic>.from(data);
+    return const {'ok': false, 'active_tokens': 0, 'tray_expected': false};
+  }
+
   /// Fetch this device's FCM token, persist it into `fcm_tokens` (the table the
-  /// sender reads), and join the broadcast topic. Called after sign-in. Best
-  /// effort and idempotent — an upsert keyed on (user_id, token).
+  /// sender reads), and join the broadcast topic.
+  ///
+  /// This works for a signed-in account AND for an anonymous guest session:
+  /// the row is scoped by `auth.uid()`, and an anonymous buyer has a real
+  /// auth.uid(). Called after sign-in, after the guest session opens, and at
+  /// startup when a session was restored.
   Future<void> registerToken() async {
-    if (!_initialized) return;
+    if (!_firebaseReady) return;
     try {
       final token = await FirebaseMessaging.instance.getToken();
       if (token == null || token.isEmpty) return;
@@ -244,10 +479,14 @@ class NotificationService {
   /// when the session is already gone it still clears the local token. Best
   /// effort — the sender reaps a token FCM reports as unregistered regardless.
   Future<void> removeToken() async {
-    if (!_initialized) return;
+    if (!_firebaseReady) return;
     final uid = Supabase.instance.client.auth.currentUser?.id;
-    final token = _token;
+    var token = _token;
     try {
+      // A logout can happen before registerToken() ever completed (for
+      // example right after a guest opens checkout and backs out), so read the
+      // token again rather than leave the row alive because _token was null.
+      token ??= await FirebaseMessaging.instance.getToken();
       if (uid != null && token != null) {
         await Supabase.instance.client
             .from('fcm_tokens')
@@ -263,22 +502,73 @@ class NotificationService {
     _token = null;
   }
 
+  /// The exact row stored for a token. Public and pure so the guest/buyer
+  /// invariant can be tested without Firebase or a live database.
+  static Map<String, dynamic> tokenRowFor({
+    required String userId,
+    required String token,
+    String deviceType = 'android',
+  }) {
+    return {
+      'user_id': userId,
+      'token': token,
+      'device_type': deviceType,
+      'is_active': true,
+      'updated_at': DateTime.now().toUtc().toIso8601String(),
+    };
+  }
+
   // ── internals ────────────────────────────────────────────────────────────
 
   Future<void> _upsertToken(String token) async {
     final uid = Supabase.instance.client.auth.currentUser?.id;
     if (uid == null) return;
     await Supabase.instance.client.from('fcm_tokens').upsert(
-      {
-        'user_id': uid,
-        'token': token,
-        'device_type':
+      tokenRowFor(
+        userId: uid,
+        token: token,
+        deviceType:
             defaultTargetPlatform == TargetPlatform.iOS ? 'ios' : 'android',
-        'is_active': true,
-        'updated_at': DateTime.now().toUtc().toIso8601String(),
-      },
+      ),
       onConflict: 'user_id,token',
     );
+  }
+
+  Future<void> _showForeground(RemoteMessage message) async {
+    final notification = message.notification;
+    if (notification == null) return;
+    final data = _asDataMap(message.data);
+    final channel = notificationChannelFor('${data['type'] ?? ''}', data);
+    try {
+      await _local.show(
+        message.messageId?.hashCode ??
+            DateTime.now().millisecondsSinceEpoch.remainder(1 << 31),
+        notification.title ?? 'Aliob',
+        notification.body ?? '',
+        NotificationDetails(
+          android: AndroidNotificationDetails(
+            channel.id,
+            channel.name,
+            channelDescription: channel.description,
+            importance: channel.importance,
+            priority: channel.importance == Importance.low
+                ? Priority.low
+                : Priority.high,
+            icon: 'ic_stat_aliob',
+            color: const Color(0xFF1B5E20),
+            playSound: channel.playSound,
+            enableVibration: channel.enableVibration,
+            styleInformation: BigTextStyleInformation(
+              notification.body ?? '',
+            ),
+          ),
+          iOS: const DarwinNotificationDetails(),
+        ),
+        payload: jsonEncode(data),
+      );
+    } catch (e) {
+      debugPrint('NotificationService: foreground show failed: $e');
+    }
   }
 
   Map<String, dynamic> _asDataMap(Map<String, dynamic> data) => data;
@@ -286,7 +576,10 @@ class NotificationService {
   /// Resolve a push payload to a route using the SAME mapper the inbox uses,
   /// then navigate — now if the router is up, else park it until it is.
   void _openFromData(Map<String, dynamic> data) {
-    final path = notificationTargetPath({'data': data});
+    final path = notificationTargetPath(
+      {'data': data},
+      viewerRole: '${data['recipient_role'] ?? 'user'}',
+    );
     if (path == null) return;
     if (_router != null) {
       _navigate(path);

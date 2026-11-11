@@ -1,6 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+
+import 'notification_service.dart';
 
 /// Browsing without an account — the default way into the app.
 ///
@@ -44,10 +48,21 @@ final guestModeProvider =
 /// never a spinner over an identity that cannot be created.
 Future<bool> ensureGuestCheckoutSession(BuildContext context) async {
   final client = Supabase.instance.client;
-  if (client.auth.currentSession != null) return true;
+  if (client.auth.currentSession != null) {
+    // A restored anonymous session already has an auth.uid(); keep its device
+    // token current for the order that is about to be placed.
+    unawaited(NotificationService.instance.registerToken());
+    return true;
+  }
 
   try {
     await client.auth.signInAnonymously();
+    // The guest now has a real auth.uid(). Register this device against it
+    // BEFORE the order is submitted: checkout approval, vehicle assignment
+    // and "driver arriving" are pushed to the buyer, and a buyer who never
+    // registers a token can only ever see them in the inbox after reopening
+    // the app. Best-effort — checkout must not fail because push did.
+    unawaited(NotificationService.instance.registerToken());
     return true;
   } catch (_) {
     if (context.mounted) {

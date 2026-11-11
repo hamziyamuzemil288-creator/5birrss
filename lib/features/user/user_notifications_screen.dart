@@ -44,11 +44,66 @@ String? notificationTargetPath(
     return text.isEmpty ? null : text;
   }
 
+  final event = '${payload['event'] ?? ''}'.trim().toLowerCase();
+  final role = payload['recipient_role']?.toString().trim().toLowerCase() ??
+      viewerRole.trim().toLowerCase();
+  final isAdmin = role == 'admin';
+  final isProvider = role == 'provider';
+
+  // A notification about a checkout request belongs to the admin queue, not
+  // to the buyer's order screen. This is the one event whose destination is
+  // decided by the event rather than by the id.
+  if (event == 'checkout_request') return '/admin/checkout-requests';
+
+  // Driver assignment is a delivery job, even though its notification type is
+  // an ORDER type. Without this branch a driver tapping it would land on the
+  // buyer's order page.
+  if (event == 'delivery_assigned' || event == 'driver_assigned') {
+    return '/vehicle/delivery-jobs';
+  }
+
   final orderId = id('order_id');
-  if (orderId != null) return '/user/orders/$orderId';
+  if (orderId != null) {
+    // The admin approved the checkout: the buyer's useful screen is the live
+    // delivery map, not the waiting room. A provider's own order queue is the
+    // equivalent screen for them.
+    if (event == 'checkout_approved') {
+      if (isProvider) return '/provider/orders';
+      if (!isAdmin) return '/user/orders/$orderId/delivery';
+    }
+    if (event == 'checkout_rejected') {
+      return isProvider ? '/provider/orders' : '/user/orders/$orderId';
+    }
+    if (event == 'checkout_pending' || event == 'order_awaiting_approval') {
+      return isAdmin
+          ? '/admin/checkout-requests'
+          : '/user/checkout/waiting/$orderId';
+    }
+    if (isAdmin) return '/admin/checkout-requests';
+    if (isProvider) return '/provider/orders';
+    return '/user/orders/$orderId';
+  }
+
+  // Availability is checked before the generic request_id branch: a stock
+  // check carries no ride id, but a provider/admin ask must not be sent to the
+  // rider's active-ride screen.
+  final availabilityId = id('availability_request_id');
+  if (availabilityId != null) {
+    if (isAdmin) return '/admin/availability';
+    if (isProvider) return '/provider';
+    // A buyer who was told "available" continues at the cart. A refusal has
+    // no next screen to open, so the inbox itself is the honest destination.
+    final accepted = payload['accepted'] == true ||
+        '${payload['accepted'] ?? ''}'.toLowerCase() == 'true';
+    return accepted ? '/user/cart' : '/user/orders';
+  }
 
   final rideId = id('ride_id') ?? id('request_id');
-  if (rideId != null) return '/user/ride-active';
+  if (rideId != null) {
+    return isProvider ? '/vehicle/ride-requests' : '/user/ride-active';
+  }
+
+  if (event == 'test_notification') return '/admin-notifications';
 
   final appealId = id('appeal_case_id') ?? id('appeal_id');
   if (appealId != null) return '/appeals';
@@ -124,31 +179,41 @@ class _UserNotificationsScreenState
     }
   }
 
-  /// True when the signed-in account runs a business, which decides whether an
-  /// order notification opens the provider's half of the order or the buyer's.
+  /// Which half of the app this reader belongs to. An order notification
+  /// opens the provider's queue for a provider, the admin queue for an admin,
+  /// and the buyer's order for everyone else.
   ///
   /// Resolved once and cached rather than asked per row: it is one query, and
   /// a tap that awaits it would make the list feel dead.
-  bool? _isProviderAccount;
+  String? _viewerRoleCache;
 
-  Future<bool> _providerAccount() async {
-    if (_isProviderAccount != null) return _isProviderAccount!;
+  Future<String> _viewerRole() async {
+    if (_viewerRoleCache != null) return _viewerRoleCache!;
     final userId = Supabase.instance.client.auth.currentUser?.id;
-    if (userId == null) return false;
+    if (userId == null) return 'buyer';
     try {
-      final row = await Supabase.instance.client
+      final admin = await Supabase.instance.client
+          .from('user_roles')
+          .select('user_id')
+          .eq('user_id', userId)
+          .eq('role', 'ADMIN')
+          .limit(1);
+      if ((admin as List).isNotEmpty) {
+        _viewerRoleCache = 'admin';
+        return 'admin';
+      }
+      final provider = await Supabase.instance.client
           .from('provider_profiles')
           .select('id')
           .eq('user_id', userId)
           .limit(1);
-      final value = (row as List).isNotEmpty;
-      _isProviderAccount = value;
-      return value;
+      _viewerRoleCache = (provider as List).isNotEmpty ? 'provider' : 'buyer';
+      return _viewerRoleCache!;
     } catch (_) {
       // Never fatal. A reader who cannot be classified still gets their
       // notifications, opened with the buyer's view -- the order detail screen
       // loads the same row either way.
-      return false;
+      return 'buyer';
     }
   }
 
@@ -202,15 +267,18 @@ class _UserNotificationsScreenState
       ref.invalidate(unreadNotificationsCountProvider);
     }
 
-    final path = notificationTargetPath(
-      n,
-      viewerRole: await _providerAccount() ? 'provider' : 'user',
-    );
+    final role = await _viewerRole();
+    final path = notificationTargetPath(n, viewerRole: role);
     if (path == null || !mounted) return;
     // The order route reads `extra` as the viewer role; anything else takes no
     // argument, and passing one to a route that ignores it is harmless but
     // passing one where the builder casts it is not.
-    context.push(path, extra: path.startsWith('/user/orders/') ? (await _providerAccount() ? 'provider' : 'user') : null);
+    context.push(
+      path,
+      extra: path.startsWith('/user/orders/')
+          ? (role == 'provider' ? 'provider' : 'user')
+          : null,
+    );
   }
 
   Color _iconColor(String type) {
