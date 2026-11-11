@@ -1830,10 +1830,9 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
                   onTap: () => _selectFeedCategory(id),
                 );
               },
-            ),
-          ),
+            ),          ),
         ],
-      );
+      ),
     );
   }
 
