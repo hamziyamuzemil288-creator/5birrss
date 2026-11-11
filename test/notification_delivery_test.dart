@@ -126,7 +126,7 @@ void main() {
         notificationTargetPath({
           'data': {'event': 'test_notification'},
         }),
-        '/user/inbox/admin-notifications',
+        '/admin-notifications',
       );
       expect(notificationTargetPath({'data': {}}), isNull);
     });
